@@ -1,6 +1,10 @@
 [build]
-  publish = "dist"
+  base = "lemmapath"
   command = "npm run build"
+  publish = "dist"
+
+[build.environment]
+  NODE_VERSION = "22"
 
 [[redirects]]
   from = "/*"
