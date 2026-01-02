@@ -1,6 +1,10 @@
-import * as XLSX from "xlsx";
 import { db, type Dataset, type SentenceRow, makeId, type ImportBatchRow } from "./db";
 import { countTokens } from "./tokenize";
+
+// XLSX is large. Load it only when the user imports an .xlsx file.
+async function loadXLSX() {
+  return await import("xlsx");
+}
 
 export type ImportMapping = {
   sourceKey: string;
@@ -261,6 +265,7 @@ export async function importXLSX(opts: {
 }) {
   const { dataset, deckId, filename, arrayBuffer, sheetName, mapping, mode, onProgress } = opts;
 
+  const XLSX = await loadXLSX();
   const wb = XLSX.read(arrayBuffer, { type: "array" });
   const ws = wb.Sheets[sheetName];
   if (!ws) throw new Error("Sheet not found.");
@@ -357,7 +362,8 @@ export async function importXLSX(opts: {
   });
 }
 
-export function listSheetNames(arrayBuffer: ArrayBuffer) {
+export async function listSheetNames(arrayBuffer: ArrayBuffer) {
+  const XLSX = await loadXLSX();
   const wb = XLSX.read(arrayBuffer, { type: "array" });
   return wb.SheetNames;
 }

@@ -1,9 +1,0 @@
-{
-  "name": "LemmaPath",
-  "short_name": "LemmaPath",
-  "display": "standalone",
-  "start_url": "/",
-  "scope": "/",
-  "theme_color": "#6b4f3a",
-  "background_color": "#f6f1ea"
-}

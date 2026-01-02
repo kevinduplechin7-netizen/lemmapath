@@ -5,745 +5,1067 @@ import {
   createDeck,
   ensureDefaultDataset,
   ensureDefaultDeck,
+  ensureDatasetStats,
   ensurePathProgress,
-  getSentenceByOrder,
-  getSentenceCount,
+  recordTokensSeen,
   type Dataset,
   type Deck,
   type PathProgressRow,
   type SentenceRow,
   type SRSRow
 } from "./data/db";
-import { InstallCard } from "./components/InstallCard";
+import { countTokens, tokenizeText } from "./data/tokenize";
 import { ImportPanel } from "./components/ImportPanel";
-import { PracticeCard } from "./components/PracticeCard";
+import { LanguageManager } from "./components/LanguageManager";
 import { SettingsDrawer } from "./components/SettingsDrawer";
-import { exportAllToJSON, importAllFromJSON } from "./data/backup";
+import { InstallCard } from "./components/InstallCard";
+import { SentenceCard } from "./components/SentenceCard";
+import { Modal } from "./components/Modal";
 import { useTTS } from "./hooks/useTTS";
 
-function autoRTL(text: string) {
-  return /[\u0591-\u07FF\uFB1D-\uFDFD\uFE70-\uFEFC]/.test(text);
+type Mode = "linear" | "srs";
+
+type Toast = { msg: string; ts: number } | null;
+
+function clamp(n: number, a: number, b: number) {
+  return Math.max(a, Math.min(b, n));
 }
 
-const DAY_MS = 24 * 60 * 60 * 1000;
+function isRTLText(text: string): boolean {
+  // Rough heuristic.
+  return /[\u0590-\u05FF\u0600-\u06FF]/.test(text);
+}
 
-type ActiveCard =
-  | { kind: "none"; row: null; srs: null }
-  | { kind: "linear"; row: SentenceRow; srs: null }
-  | { kind: "srs"; row: SentenceRow; srs: SRSRow | null; isNew: boolean };
+function sleep(ms: number) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+function scoreSRS(ease: number, rating: "again" | "hard" | "good" | "easy") {
+  // A light, Anki-inspired scheduler: we keep ease and interval days.
+  if (rating === "again") return { ease: clamp(ease - 0.2, 1.3, 2.8), mult: 0.0, minDays: 0 };
+  if (rating === "hard") return { ease: clamp(ease - 0.05, 1.3, 2.8), mult: 1.0, minDays: 1 };
+  if (rating === "good") return { ease: clamp(ease + 0.0, 1.3, 2.8), mult: 1.8, minDays: 1 };
+  return { ease: clamp(ease + 0.1, 1.3, 2.8), mult: 2.2, minDays: 1 };
+}
+
+function scheduleSRS(state: { reps: number; intervalDays: number; ease: number }, rating: "again" | "hard" | "good" | "easy") {
+  const scored = scoreSRS(state.ease, rating);
+  const reps = rating === "again" ? 0 : state.reps + 1;
+
+  let nextInterval = 0;
+  if (rating === "again") nextInterval = 0;
+  else if (state.reps === 0) nextInterval = Math.max(1, scored.minDays);
+  else if (state.reps === 1) nextInterval = Math.max(3, scored.minDays);
+  else nextInterval = Math.max(Math.round(state.intervalDays * scored.ease * scored.mult), scored.minDays);
+
+  return {
+    reps,
+    intervalDays: nextInterval,
+    ease: scored.ease
+  };
+}
+
+function downloadText(filename: string, text: string, mime: string) {
+  const blob = new Blob([text], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 2500);
+}
+
+function makeTemplateTSV() {
+  return [
+    ["English", "Target", "Transliteration", "Gloss"].join("\t"),
+    ["My parents don't know where I am.", "…", "…", "my parents / do not / know / where / I am"].join("\t")
+  ].join("\n");
+}
 
 export default function App() {
-  const { voices, speak, prime, unlocked, isIOS } = useTTS();
+  const tts = useTTS();
+
+  const [toast, setToast] = useState<Toast>(null);
+  const showToast = (msg: string) => {
+    setToast({ msg, ts: Date.now() });
+    setTimeout(() => setToast((t) => (t && Date.now() - t.ts > 1800 ? null : t)), 2000);
+  };
+
+  const [view, setView] = useState<"home" | "practice" | "library">("home");
 
   const [datasets, setDatasets] = useState<Dataset[]>([]);
-  const [dataset, setDataset] = useState<Dataset | null>(null);
-
   const [decks, setDecks] = useState<Deck[]>([]);
-  const [deck, setDeck] = useState<Deck | null>(null);
+
+  const [datasetId, setDatasetId] = useState<string>("");
+  const [deckId, setDeckId] = useState<string>("");
+
+  const dataset = useMemo(() => datasets.find((d) => d.id === datasetId) ?? null, [datasets, datasetId]);
+  const deck = useMemo(() => decks.find((d) => d.id === deckId) ?? null, [decks, deckId]);
 
   const [pathProg, setPathProg] = useState<PathProgressRow | null>(null);
+  const [uniqueWords, setUniqueWords] = useState<number>(0);
+  const [sentenceCount, setSentenceCount] = useState<number>(0);
+  const [dueCount, setDueCount] = useState<number>(0);
 
-  const [count, setCount] = useState(0);
-  const [dueCount, setDueCount] = useState(0);
+  const [row, setRow] = useState<SentenceRow | null>(null);
+  const [srsRow, setSrsRow] = useState<SRSRow | null>(null);
 
-  const [card, setCard] = useState<ActiveCard>({ kind: "none", row: null, srs: null });
+  const [showSource, setShowSource] = useState<boolean>(() => localStorage.getItem("sentencepaths_showSource") !== "0");
+  const [showTranslit, setShowTranslit] = useState<boolean>(() => localStorage.getItem("sentencepaths_showTranslit") === "1");
+  const [showGloss, setShowGloss] = useState<boolean>(() => localStorage.getItem("sentencepaths_showGloss") === "1");
+  const [fontScale, setFontScale] = useState<number>(() => {
+    const raw = localStorage.getItem("sentencepaths_fontScale");
+    return raw ? clamp(parseFloat(raw), 0.8, 1.4) : 1;
+  });
 
-  const [showSource, setShowSource] = useState(true);
-  const [showTranslit, setShowTranslit] = useState(false);
-  const [showGloss, setShowGloss] = useState(false);
-  const [fontScale, setFontScale] = useState(1);
+  const [showHelp, setShowHelp] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
 
-  const loadingRef = useRef(false);
-  const importFileInputRef = useRef<HTMLInputElement>(null);
-  const importSectionRef = useRef<HTMLDivElement>(null);
+  const [forceImportTips, setForceImportTips] = useState(false);
+  const [showNewLanguage, setShowNewLanguage] = useState(false);
+  const [newLanguageName, setNewLanguageName] = useState("");
+  const [newLanguageTag, setNewLanguageTag] = useState("");
+  const [showAdvancedLanguages, setShowAdvancedLanguages] = useState(false);
 
-  const [toast, setToast] = useState<string | null>(null);
-  const toastTimerRef = useRef<number | null>(null);
+  const [autoRun, setAutoRun] = useState<boolean>(() => localStorage.getItem("sentencepaths_autoRun") === "1");
+  const [autoAfter, setAutoAfter] = useState<"audio" | "delay">(
+    (localStorage.getItem("sentencepaths_autoAfter") as any) === "delay" ? "delay" : "audio"
+  );
+  const [autoDelaySec, setAutoDelaySec] = useState<number>(() => {
+    const raw = localStorage.getItem("sentencepaths_autoDelaySec");
+    return raw ? clamp(parseFloat(raw), 0.0, 10) : 0.5;
+  });
 
-  const showToast = (msg: string) => {
-    setToast(msg);
-    if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
-    toastTimerRef.current = window.setTimeout(() => setToast(null), 1800);
-  };
+  const [ttsEnglish, setTTSEnglish] = useState<boolean>(() => localStorage.getItem("sentencepaths_ttsEnglish") === "1");
 
-  const [showOnboarding, setShowOnboarding] = useState(() => localStorage.getItem("lemmapath_hide_onboarding") !== "1");
-
-  const openImportPicker = () => {
-    // Keep the user oriented, then open the OS file picker.
-    importSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
-    // Delay one frame so scroll starts (still counts as user gesture in practice).
-    requestAnimationFrame(() => importFileInputRef.current?.click());
-  };
+  // Persist preferences
+  useEffect(() => {
+    localStorage.setItem("sentencepaths_showSource", showSource ? "1" : "0");
+  }, [showSource]);
+  useEffect(() => {
+    localStorage.setItem("sentencepaths_showTranslit", showTranslit ? "1" : "0");
+  }, [showTranslit]);
+  useEffect(() => {
+    localStorage.setItem("sentencepaths_showGloss", showGloss ? "1" : "0");
+  }, [showGloss]);
+  useEffect(() => {
+    localStorage.setItem("sentencepaths_fontScale", String(fontScale));
+  }, [fontScale]);
+  useEffect(() => {
+    localStorage.setItem("sentencepaths_autoRun", autoRun ? "1" : "0");
+  }, [autoRun]);
+  useEffect(() => {
+    localStorage.setItem("sentencepaths_autoAfter", autoAfter);
+  }, [autoAfter]);
+  useEffect(() => {
+    localStorage.setItem("sentencepaths_autoDelaySec", String(autoDelaySec));
+  }, [autoDelaySec]);
+  useEffect(() => {
+    localStorage.setItem("sentencepaths_ttsEnglish", ttsEnglish ? "1" : "0");
+  }, [ttsEnglish]);
 
   const rtl = useMemo(() => {
-    if (!dataset || !card.row) return false;
+    if (!dataset) return false;
     if (dataset.rtlMode === "rtl") return true;
     if (dataset.rtlMode === "ltr") return false;
-    return autoRTL(card.row.targetText);
-  }, [dataset, card.row]);
+    return row?.targetText ? isRTLText(row.targetText) : false;
+  }, [dataset, row]);
 
-  async function loadLibrary(preferDatasetId?: string, preferDeckId?: string) {
+  // ---- Load + seed ----
+  async function loadAll() {
     const ds = await ensureDefaultDataset();
+    const dk = await ensureDefaultDeck(ds.id);
+
+    // Lazy-load starter sample so it does not bloat the initial bundle.
+    const { seedSampleIfEmpty } = await import("./data/sample");
+    await seedSampleIfEmpty(ds, dk);
+    await ensureDatasetStats(ds.id);
 
     const allDatasets = await db.datasets.orderBy("createdAt").toArray();
+    const currentDatasetId = localStorage.getItem("sentencepaths_currentDataset") ?? ds.id;
+    const safeDatasetId = allDatasets.find((d) => d.id === currentDatasetId)?.id ?? ds.id;
+
+    const allDecks = await db.decks.where("datasetId").equals(safeDatasetId).sortBy("createdAt");
+    const desiredDeckId = localStorage.getItem("sentencepaths_currentDeck") ?? (allDecks[0]?.id ?? dk.id);
+    const safeDeckId = allDecks.find((d) => d.id === desiredDeckId)?.id ?? (allDecks[0]?.id ?? dk.id);
+
     setDatasets(allDatasets);
-
-    const storedDsId = preferDatasetId ?? localStorage.getItem("lemmapath_datasetId") ?? ds.id;
-    const activeDs = allDatasets.find((d) => d.id === storedDsId) ?? ds;
-
-    localStorage.setItem("lemmapath_datasetId", activeDs.id);
-    setDataset(activeDs);
-
-    document.documentElement.setAttribute("data-theme", activeDs.theme);
-
-    const ensuredDefaultDeck = await ensureDefaultDeck(activeDs.id);
-    const allDecks = await db.decks.where("datasetId").equals(activeDs.id).sortBy("createdAt");
     setDecks(allDecks);
-
-    const storedDeckId = preferDeckId ?? localStorage.getItem("lemmapath_deckId") ?? ensuredDefaultDeck.id;
-    const activeDeck = allDecks.find((d) => d.id === storedDeckId) ?? ensuredDefaultDeck;
-
-    localStorage.setItem("lemmapath_deckId", activeDeck.id);
-    setDeck(activeDeck);
-
-    await refresh(activeDs, activeDeck);
+    setDatasetId(safeDatasetId);
+    setDeckId(safeDeckId);
   }
 
-  async function getNextSrsCard(activeDs: Dataset, activeDeck: Deck, pp: PathProgressRow): Promise<ActiveCard> {
-    const now = Date.now();
+  async function createLanguage(name: string, tag: string) {
+    const nd = await createDataset({ name, languageTag: tag || "und" });
+    const dk = await ensureDefaultDeck(nd.id);
+    await ensureDatasetStats(nd.id);
 
-    const due = await db.srs
-      .where("[datasetId+deckId+dueAt]")
-      .between([activeDs.id, activeDeck.id, -Infinity], [activeDs.id, activeDeck.id, now])
-      .first();
+    const all = await db.datasets.orderBy("createdAt").toArray();
+    setDatasets(all);
+    setDatasetId(nd.id);
+    setDeckId(dk.id);
 
-    const dueC = await db.srs
-      .where("[datasetId+deckId+dueAt]")
-      .between([activeDs.id, activeDeck.id, -Infinity], [activeDs.id, activeDeck.id, now])
-      .count();
+    // Make the next step obvious.
+    setView("library");
+    setForceImportTips(true);
+    showToast("Language added");
+  }
 
-    setDueCount(dueC);
+  useEffect(() => {
+    loadAll().catch((e) => console.error(e));
+  }, []);
 
-    if (due) {
-      const s = await db.sentences.get(due.sentenceId);
-      if (s) return { kind: "srs", row: s, srs: due, isNew: false };
-    }
+  // Apply theme at the document level so the background matches too.
+  useEffect(() => {
+    const t = dataset?.theme === "dark" ? "dark" : "paper";
+    document.documentElement.setAttribute("data-theme", t);
+  }, [dataset?.theme]);
 
-    // No due cards — introduce the next new sentence in order.
-    // If we somehow land on a sentence that already has SRS state, skip forward.
-    let probe = pp.srsNewOrder;
-    for (let tries = 0; tries < 50; tries++) {
-      const s = await getSentenceByOrder(activeDs.id, activeDeck.id, probe);
-      if (!s) return { kind: "none", row: null, srs: null };
-
-      const existing = await db.srs.get([activeDs.id, activeDeck.id, s.id]);
-      if (!existing) {
-        setDueCount(0);
-        return { kind: "srs", row: s, srs: null, isNew: true };
+  // When dataset changes, refresh deck list.
+  useEffect(() => {
+    if (!datasetId) return;
+    (async () => {
+      const allDecks = await db.decks.where("datasetId").equals(datasetId).sortBy("createdAt");
+      setDecks(allDecks);
+      const first = allDecks[0]?.id ?? "";
+      if (!deckId || !allDecks.some((d) => d.id === deckId)) {
+        setDeckId(first);
       }
-      probe++;
-    }
+      localStorage.setItem("sentencepaths_currentDataset", datasetId);
+    })().catch((e) => console.error(e));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [datasetId]);
 
-    return { kind: "none", row: null, srs: null };
+  useEffect(() => {
+    if (deckId) localStorage.setItem("sentencepaths_currentDeck", deckId);
+  }, [deckId]);
+
+  // ---- Queries ----
+  async function refreshCounts() {
+    if (!datasetId || !deckId) return;
+
+    const pp = await db.pathProgress.get([datasetId, deckId]);
+    if (pp) setPathProg(pp);
+
+    const stats = await ensureDatasetStats(datasetId);
+    setUniqueWords(stats.uniqueWordsSeen ?? 0);
+
+    const count = await db.sentences.where("[datasetId+deckId]").equals([datasetId, deckId]).count();
+    setSentenceCount(count);
+
+    const now = Date.now();
+    const due = await db.srs.where("[datasetId+deckId+dueAt]").between([datasetId, deckId, 0], [datasetId, deckId, now], true, true).count();
+    setDueCount(due);
   }
 
-  async function refresh(activeDs?: Dataset, activeDeck?: Deck) {
-    const ds = activeDs ?? dataset;
-    const dk = activeDeck ?? deck;
-    if (!ds || !dk) return;
-
-    const c = await getSentenceCount(ds.id, dk.id);
-    setCount(c);
-
-    const pp = await ensurePathProgress(ds.id, dk.id);
-    setPathProg(pp);
-
-    if (c === 0) {
-      setDueCount(0);
-      setCard({ kind: "none", row: null, srs: null });
+  async function pickCurrent() {
+    if (!datasetId || !deckId) return;
+    const pp = (await db.pathProgress.get([datasetId, deckId])) ?? null;
+    if (!pp) {
+      setRow(null);
+      setSrsRow(null);
       return;
     }
 
     if (pp.mode === "linear") {
-      const maxOrder = Math.max(0, c - 1);
-      const nextOrder = Math.min(Math.max(0, pp.linearOrder), maxOrder);
-
-      if (nextOrder !== pp.linearOrder) {
-        const patched = { ...pp, linearOrder: nextOrder, updatedAt: Date.now() };
-        await db.pathProgress.put(patched);
-        setPathProg(patched);
-      }
-
-      const r = await getSentenceByOrder(ds.id, dk.id, nextOrder);
-      if (!r) {
-        setCard({ kind: "none", row: null, srs: null });
+      const current =
+        (await db.sentences
+          .where("[datasetId+deckId+order]")
+          .equals([datasetId, deckId, pp.linearOrder])
+          .first()) ?? null;
+      if (current) {
+        setRow(current);
+        setSrsRow(null);
         return;
       }
 
-      setDueCount(0);
-      setCard({ kind: "linear", row: r, srs: null });
+      // Fallback: if the pointer is out of bounds or orders are sparse, clamp to the nearest existing row.
+      const ordered = db.sentences
+        .where("[datasetId+deckId+order]")
+        .between([datasetId, deckId, 0], [datasetId, deckId, Number.MAX_SAFE_INTEGER], true, true);
+      const first = (await ordered.first()) ?? null;
+      const last = (await ordered.last()) ?? null;
+      const chosen = last && pp.linearOrder > (last.order ?? 0) ? last : first;
+      if (chosen) {
+        const fixed: PathProgressRow = { ...pp, linearOrder: chosen.order ?? 0, updatedAt: Date.now() };
+        await db.pathProgress.put(fixed);
+        setPathProg(fixed);
+        setRow(chosen);
+      } else {
+        setRow(null);
+      }
+      setSrsRow(null);
       return;
     }
 
-    // SRS mode
-    setCard(await getNextSrsCard(ds, dk, pp));
-  }
-
-  useEffect(() => {
-    loadLibrary().catch((err) => console.error(err));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  useEffect(() => {
-    if (!dataset) return;
-    document.documentElement.setAttribute("data-theme", dataset.theme);
-  }, [dataset]);
-
-
-
-  async function bumpLinear(delta: number, countRep: boolean) {
-    if (!dataset || !deck || !pathProg) return;
-    if (pathProg.mode !== "linear") return;
-    if (loadingRef.current) return;
-    loadingRef.current = true;
-
-    try {
-      const c = await getSentenceCount(dataset.id, deck.id);
-      const maxOrder = Math.max(0, c - 1);
-      const nextOrder = Math.min(Math.max(0, pathProg.linearOrder + delta), maxOrder);
-
-      const next = await getSentenceByOrder(dataset.id, deck.id, nextOrder);
-      if (!next) return;
-
-      const newProg: PathProgressRow = {
-        ...pathProg,
-        linearOrder: nextOrder,
-        updatedAt: Date.now(),
-        lifetimeReps: countRep ? pathProg.lifetimeReps + 1 : pathProg.lifetimeReps,
-        lifetimeTokens: countRep ? pathProg.lifetimeTokens + next.tokenCount : pathProg.lifetimeTokens
-      };
-
-      await db.pathProgress.put(newProg);
-      setPathProg(newProg);
-      setCard({ kind: "linear", row: next, srs: null });
-    } finally {
-      loadingRef.current = false;
-    }
-  }
-
-  function computeSrsUpdate(prev: SRSRow, grade: "again" | "good" | "easy") {
+    // SRS: due first, else new.
     const now = Date.now();
-    let ease = prev.ease;
-    let reps = prev.reps;
-    let lapses = prev.lapses;
-    let intervalDays = prev.intervalDays;
-    let dueAt = prev.dueAt;
+    const due =
+      (await db.srs
+        .where("[datasetId+deckId+dueAt]")
+        .between([datasetId, deckId, 0], [datasetId, deckId, now], true, true)
+        .sortBy("dueAt")) ?? [];
 
-    if (grade === "again") {
-      lapses += 1;
-      reps = 0;
-      intervalDays = 0;
-      ease = Math.max(1.3, ease - 0.2);
-      dueAt = now + 10 * 60 * 1000;
-    } else if (grade === "good") {
-      reps += 1;
-      if (reps === 1) intervalDays = 1;
-      else if (reps === 2) intervalDays = 6;
-      else intervalDays = Math.max(1, Math.round(intervalDays * ease));
-      dueAt = now + intervalDays * DAY_MS;
-    } else {
-      // easy
-      reps += 1;
-      ease = Math.min(3.0, ease + 0.15);
-      if (reps === 1) intervalDays = 4;
-      else if (reps === 2) intervalDays = 10;
-      else intervalDays = Math.max(1, Math.round(intervalDays * ease * 1.3));
-      dueAt = now + intervalDays * DAY_MS;
+    if (due.length) {
+      const s = due[0] as SRSRow;
+      const sentence = (await db.sentences.get(s.sentenceId)) ?? null;
+      setRow(sentence);
+      setSrsRow(s);
+      return;
     }
 
-    return { ease, reps, lapses, intervalDays, dueAt, updatedAt: now };
-  }
+    const fresh =
+      (await db.sentences
+        .where("[datasetId+deckId+order]")
+        .equals([datasetId, deckId, pp.srsNewOrder])
+        .first()) ?? null;
 
-  async function rateSRS(grade: "again" | "good" | "easy") {
-    if (!dataset || !deck || !pathProg) return;
-    if (pathProg.mode !== "srs") return;
-    if (card.kind !== "srs" || !card.row) return;
-    if (loadingRef.current) return;
-    loadingRef.current = true;
-
-    try {
-      const key: [string, string, string] = [dataset.id, deck.id, card.row.id];
-
-      const base: SRSRow =
-        card.srs ??
-        ({
-          datasetId: dataset.id,
-          deckId: deck.id,
-          sentenceId: card.row.id,
-          dueAt: Date.now(),
-          reps: 0,
-          lapses: 0,
-          intervalDays: 0,
-          ease: 2.5,
-          updatedAt: Date.now()
-        } as SRSRow);
-
-      const patch = computeSrsUpdate(base, grade);
-      const nextSrs: SRSRow = { ...base, ...patch };
-
-      await db.srs.put(nextSrs);
-
-      const isFirstTime = card.srs === null;
-      const newProg: PathProgressRow = {
-        ...pathProg,
-        srsNewOrder: isFirstTime ? pathProg.srsNewOrder + 1 : pathProg.srsNewOrder,
-        lifetimeReps: pathProg.lifetimeReps + 1,
-        lifetimeTokens: pathProg.lifetimeTokens + (card.row.tokenCount || 0),
-        updatedAt: Date.now()
-      };
-
-      await db.pathProgress.put(newProg);
-      setPathProg(newProg);
-
-      await refresh(dataset, deck);
-    } finally {
-      loadingRef.current = false;
+    if (!fresh) {
+      setRow(null);
+      setSrsRow(null);
+      return;
     }
+
+    // Ensure SRS row exists for this sentence.
+    const key: [string, string, string] = [datasetId, deckId, fresh.id];
+    const existing = (await db.srs.get(key)) ?? null;
+    const seeded: SRSRow =
+      existing ??
+      ({
+        datasetId,
+        deckId,
+        sentenceId: fresh.id,
+        dueAt: now,
+        reps: 0,
+        ease: 2.2,
+        intervalDays: 0,
+        lastReviewedAt: 0,
+        createdAt: now
+      } as any);
+
+    if (!existing) await db.srs.put(seeded as any);
+    setRow(fresh);
+    setSrsRow(seeded);
   }
 
-  async function toggleMode(nextMode: "linear" | "srs") {
-    if (!dataset || !deck || !pathProg) return;
-    const patched: PathProgressRow = { ...pathProg, mode: nextMode, updatedAt: Date.now() };
-    await db.pathProgress.put(patched);
-    setPathProg(patched);
-    await refresh(dataset, deck);
-  }
-
-  const playAudio = () => {
-    if (!dataset || !card.row) return;
-    try {
-      if (!("speechSynthesis" in window)) {
-        showToast("Audio is not supported in this browser.");
-        return;
-      }
-
-      // Mobile browsers generally require a user gesture. We keep audio manual (no autoplay).
-      if (isIOS && !unlocked) {
-        prime();
-        // give iOS a beat to unlock
-        window.setTimeout(() => {
-          speak(card.row!.targetText, {
-            lang: dataset.languageTag,
-            rate: dataset.ttsRate,
-            pitch: dataset.ttsPitch,
-            voiceURI: dataset.preferredVoiceURI
-          });
-        }, 40);
-      } else {
-        speak(card.row.targetText, {
-          lang: dataset.languageTag,
-          rate: dataset.ttsRate,
-          pitch: dataset.ttsPitch,
-          voiceURI: dataset.preferredVoiceURI
-        });
-      }
-    } catch {
-      showToast("Audio couldn’t play. Try again.");
-    }
-  };
+  // Refresh whenever selection or mode changes.
+  useEffect(() => {
+    if (!datasetId || !deckId) return;
+    refreshCounts().catch(() => null);
+    pickCurrent().catch(() => null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [datasetId, deckId]);
 
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      const tag = (e.target as HTMLElement | null)?.tagName?.toLowerCase();
-      if (tag === "input" || tag === "textarea" || (e.target as any)?.isContentEditable) return;
+    if (!pathProg) return;
+    pickCurrent().catch(() => null);
+    refreshCounts().catch(() => null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pathProg?.mode, pathProg?.linearOrder, pathProg?.srsNewOrder]);
 
-      if (e.code === "Space") {
-        e.preventDefault();
+  // ---- Actions ----
+  async function ensureTokenCountForRow(r: SentenceRow): Promise<number> {
+    if (!dataset) return r.tokenCount ?? 0;
 
-        if (pathProg?.mode === "srs") {
-          if (e.shiftKey) rateSRS("again");
-          else rateSRS("good");
-          return;
-        }
+    // Small safety net for legacy rows that may still have old field names.
+    const any = r as any;
+    const legacyTarget = (any.target ?? any.Target ?? any.answer ?? any.response) as string | undefined;
+    const legacySource = (any.english ?? any.English ?? any.source ?? any.prompt) as string | undefined;
 
-        if (e.shiftKey) bumpLinear(-1, false);
-        else bumpLinear(1, true);
-      }
+    const targetText = (r.targetText || legacyTarget || "").trim();
+    const sourceText = (r.sourceText || legacySource || "").trim();
 
-      if (e.key.toLowerCase() === "r") {
-        e.preventDefault();
-        playAudio();
-      }
+    const computed = countTokens(targetText, dataset.cjkMode);
+    const needsPatch =
+      (targetText && r.targetText !== targetText) ||
+      (sourceText && r.sourceText !== sourceText) ||
+      (typeof r.tokenCount !== "number" || r.tokenCount !== computed);
 
-      if (e.key.toLowerCase() === "g") setShowGloss((v) => !v);
-      if (e.key.toLowerCase() === "t") setShowTranslit((v) => !v);
-      if (e.key.toLowerCase() === "e") setShowSource((v) => !v);
+    if (!needsPatch) return r.tokenCount ?? computed;
+
+    const patched: SentenceRow = {
+      ...(r as any),
+      targetText,
+      sourceText,
+      tokenCount: computed
     };
 
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    await db.sentences.put(patched);
+    if (row?.id === patched.id) setRow(patched);
+    return patched.tokenCount ?? computed;
+  }
+
+  async function trackWordsFromRow(r: SentenceRow) {
+    if (!dataset) return;
+    const any = r as any;
+    const text = (r.targetText || any.target || any.Target || "").toString();
+    const tokens = tokenizeText(text, dataset.cjkMode);
+    if (!tokens.length) return;
+
+    const added = await recordTokensSeen(dataset.id, tokens);
+    if (added > 0) {
+      const stats = await ensureDatasetStats(dataset.id);
+      setUniqueWords(stats.uniqueWordsSeen ?? 0);
+    }
+  }
+
+  async function bumpLinear(delta: number, countRep: boolean) {
+    if (!datasetId || !deckId || !pathProg) return;
+
+    const leaving = row;
+    const leavingTokens = countRep && leaving ? await ensureTokenCountForRow(leaving) : 0;
+
+    const currentOrder = pathProg.linearOrder;
+    const nextOrder = Math.max(0, currentOrder + delta);
+
+    const next =
+      (await db.sentences
+        .where("[datasetId+deckId+order]")
+        .equals([datasetId, deckId, nextOrder])
+        .first()) ?? null;
+
+    if (!next) {
+      showToast("End of path");
+      return;
+    }
+
+    const nextProg: PathProgressRow = {
+      ...pathProg,
+      linearOrder: nextOrder,
+      srsNewOrder: Math.max(pathProg.srsNewOrder, nextOrder),
+      lifetimeReps: pathProg.lifetimeReps + (countRep ? 1 : 0),
+      lifetimeTokens: pathProg.lifetimeTokens + (countRep ? leavingTokens : 0),
+      updatedAt: Date.now()
+    };
+
+    await db.pathProgress.put(nextProg);
+    setPathProg(nextProg);
+    setRow(next);
+    setSrsRow(null);
+
+    if (countRep && leaving) {
+      await trackWordsFromRow(leaving);
+      await refreshCounts();
+    }
+  }
+
+  async function rateSRS(rating: "again" | "hard" | "good" | "easy") {
+    if (!datasetId || !deckId || !pathProg || !row) return;
+
+    const rowTokens = await ensureTokenCountForRow(row);
+
+    const now = Date.now();
+    const currentSRS = srsRow;
+
+    // Ensure we have a row in the SRS table.
+    const key: [string, string, string] = [datasetId, deckId, row.id];
+    const base: SRSRow =
+      currentSRS ??
+      ({
+        datasetId,
+        deckId,
+        sentenceId: row.id,
+        dueAt: now,
+        reps: 0,
+        ease: 2.2,
+        intervalDays: 0,
+        lastReviewedAt: 0,
+        createdAt: now
+      } as any);
+
+    const nextState = scheduleSRS({ reps: base.reps, intervalDays: base.intervalDays, ease: base.ease }, rating);
+    const dueAt = now + nextState.intervalDays * 24 * 60 * 60 * 1000;
+
+    const nextSRS: SRSRow = {
+      ...base,
+      reps: nextState.reps,
+      intervalDays: nextState.intervalDays,
+      ease: nextState.ease,
+      dueAt,
+      lastReviewedAt: now
+    } as any;
+
+    await db.srs.put(nextSRS as any);
+
+    const countRep = true;
+    const nextProg: PathProgressRow = {
+      ...pathProg,
+      lifetimeReps: pathProg.lifetimeReps + (countRep ? 1 : 0),
+      lifetimeTokens: pathProg.lifetimeTokens + (countRep ? rowTokens : 0),
+      // If this was a "new" card (not due), move the new pointer forward.
+      srsNewOrder: currentSRS ? pathProg.srsNewOrder : pathProg.srsNewOrder + 1,
+      updatedAt: now
+    };
+
+    await db.pathProgress.put(nextProg);
+    setPathProg(nextProg);
+
+    await trackWordsFromRow(row);
+    await refreshCounts();
+    await pickCurrent();
+  }
+
+  async function toggleMode(mode: Mode) {
+    if (!datasetId || !deckId || !pathProg) return;
+    const next: PathProgressRow = { ...pathProg, mode, updatedAt: Date.now() };
+    await db.pathProgress.put(next);
+    setPathProg(next);
+    if (mode === "srs") setAutoRun(false); // keep review human-paced
+  }
+
+  async function playCurrent() {
+    if (!dataset || !row) return;
+    if (!tts.supported) {
+      showToast("Text-to-speech isn't available in this browser");
+      return;
+    }
+    if (tts.isIOS && !tts.unlocked) {
+      tts.prime();
+      showToast("Tap again to play audio");
+      return;
+    }
+
+    const target = row.targetText || "";
+    const source = row.sourceText || "";
+
+    // English first (optional), then target.
+    if (ttsEnglish && source.trim()) {
+      await tts.speakAsync(source, { lang: "en-US", rate: 1, pitch: 1 });
+    }
+
+    await tts.speakAsync(target, {
+      lang: dataset.languageTag || "und",
+      rate: dataset.ttsRate ?? 1,
+      pitch: dataset.ttsPitch ?? 1,
+      voiceURI: dataset.preferredVoiceURI
+    });
+  }
+
+  // ---- Auto-run (linear only) ----
+  const autoRunToken = useRef(0);
+  useEffect(() => {
+    if (!autoRun) return;
+    if (view !== "practice") return;
+    if (!pathProg || pathProg.mode !== "linear") return;
+    if (!row) return;
+
+    const token = ++autoRunToken.current;
+
+    (async () => {
+      // Small delay to avoid fighting state updates.
+      await sleep(120);
+      if (autoRunToken.current !== token) return;
+
+      await playCurrent();
+      if (autoRunToken.current !== token) return;
+
+      if (autoAfter === "delay") {
+        await sleep(autoDelaySec * 1000);
+      }
+
+      if (autoRunToken.current !== token) return;
+      await bumpLinear(1, true);
+    })();
+
+    return () => {
+      // stop loop
+      autoRunToken.current++;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dataset, deck, card.row, pathProg]);
+  }, [autoRun, view, pathProg?.mode, row?.id, autoAfter, autoDelaySec]);
 
-  if (!dataset || !deck) return <div className="container">Loading…</div>;
+  const reps = pathProg?.lifetimeReps ?? 0;
+  const wordsRead = pathProg?.lifetimeTokens ?? 0;
 
-  const pct = pathProg ? Math.min(1, pathProg.lifetimeTokens / dataset.goalTokens) : 0;
+  const languageName = dataset?.name ?? "";
 
-  const lastBackupAt = Number(localStorage.getItem("lemmapath_last_backup_at") || "0");
-  const needsBackup = !lastBackupAt || Date.now() - lastBackupAt > 7 * DAY_MS;
+  const rowHasTranslit = !!row?.transliterationText?.trim();
+  const rowHasGloss = !!row?.glossText?.trim();
+
+  const headerModeLabel = pathProg?.mode === "srs" ? "Review" : "Read";
 
   return (
     <div className="container">
-      <div className="header">
-        <div className="brand">
-          <strong>LemmaPath</strong>
-          <span>Sentence practice • local-first • multi-language • multi-path</span>
-        </div>
-
-        <div className="row">
-          <button className="btn" onClick={() => setShowSettings((v) => !v)}>
-            Settings
-          </button>
-          <button className="btn" onClick={() => setFontScale((v) => Math.min(1.5, v + 0.05))}>
-            A+
-          </button>
-          <button className="btn" onClick={() => setFontScale((v) => Math.max(0.85, v - 0.05))}>
-            A-
-          </button>
-        </div>
-      </div>
-
-      {needsBackup && (
-        <div className="panel" style={{ padding: 14, marginTop: 12 }}>
-          <div style={{ fontWeight: 700, marginBottom: 4 }}>Weekly backup reminder</div>
-          <div style={{ color: "var(--muted)", fontSize: 14 }}>
-            LemmaPath is local-first. Back up your library at least once per week (Settings → Backup).
+      <header className="topbar">
+        <div className="brandRow">
+          <div className="logoDot" aria-hidden="true" />
+          <div>
+            <div className="brandTitle">Sentence Paths</div>
+            <div className="brandSub">Bilingual sentences • local-first • TTS</div>
           </div>
         </div>
-      )}
 
-      <InstallCard />
-
-      <div className="panel" style={{ padding: 16, marginTop: 12 }}>
-        <div className="row" style={{ gap: 10, flexWrap: "wrap" }}>
-          <span className="pill">Language</span>
-          <select
-            className="btn"
-            value={dataset.id}
-            onChange={async (e) => {
-              const nextId = e.target.value;
-              await loadLibrary(nextId, undefined);
-            }}
-            style={{ minWidth: 240 }}
-          >
-            {datasets.map((d) => (
-              <option key={d.id} value={d.id}>
-                {d.name}
-              </option>
-            ))}
-          </select>
-
-          <button
-            className="btn"
-            onClick={async () => {
-              const name = prompt("Language name (example: French)")?.trim();
-              if (!name) return;
-              const tag = prompt("Language tag for TTS (example: fr-FR)")?.trim() || "fr-FR";
-              const ds = await createDataset({ name, languageTag: tag });
-              await loadLibrary(ds.id, undefined);
-            }}
-          >
-            New language
+        <div className="topbarCenter">
+          <button className="pill strong" onClick={() => setView("library")} title="Change language / import">
+            {languageName || "Language"}
           </button>
-
-          <span className="pill">Path</span>
-          <select
-            className="btn"
-            value={deck.id}
-            onChange={async (e) => {
-              const nextId = e.target.value;
-              localStorage.setItem("lemmapath_deckId", nextId);
-              const nextDeck = decks.find((d) => d.id === nextId) ?? null;
-              if (!nextDeck) return;
-              setDeck(nextDeck);
-              await refresh(dataset, nextDeck);
-            }}
-            style={{ minWidth: 240 }}
-          >
-            {decks.map((d) => (
-              <option key={d.id} value={d.id}>
-                {d.name}
-              </option>
-            ))}
-          </select>
-
-          <button
-            className="btn"
-            onClick={async () => {
-              const name = prompt("Path name (example: Travel B1)")?.trim();
-              if (!name) return;
-              const dk = await createDeck(dataset.id, name);
-              await ensurePathProgress(dataset.id, dk.id);
-              await loadLibrary(dataset.id, dk.id);
-            }}
-          >
-            New path
-          </button>
+          <span className="pill">{headerModeLabel}</span>
         </div>
 
-        <div className="row" style={{ justifyContent: "space-between", marginTop: 12 }}>
-          <div className="row">
-            <span className="pill">
-              Mode:{" "}
-              <strong style={{ textTransform: "uppercase" }}>{pathProg?.mode === "srs" ? "SRS" : "Linear"}</strong>
-            </span>
-            <span className="pill">
-              Reps: <strong>{pathProg?.lifetimeReps ?? 0}</strong>
-            </span>
-            <span className="pill">
-              Tokens: <strong>{pathProg?.lifetimeTokens ?? 0}</strong>
-            </span>
-            <span className="pill">
-              Sentences: <strong>{count}</strong>
-            </span>
-            {pathProg?.mode === "srs" && (
-              <span className="pill">
-                Due: <strong>{dueCount}</strong>
-              </span>
+        <div className="topbarRight">
+          <span className="statChip" title="Total repetitions">Reps&nbsp;<strong>{reps}</strong></span>
+          <span className="statChip" title="Total target tokens read">Words&nbsp;read&nbsp;<strong>{wordsRead}</strong></span>
+          <button className="iconBtn" onClick={() => setShowHelp(true)} title="Help / setup">
+            ?
+          </button>
+          <button className="iconBtn" onClick={() => setShowSettings(true)} title="Settings">
+            ⚙
+          </button>
+        </div>
+      </header>
+
+      {view === "home" ? (
+        <div style={{ marginTop: 20 }}>
+          <div className="panel" style={{ padding: 20 }}>
+            <div style={{ fontWeight: 900, fontSize: 22, letterSpacing: 0.2 }}>Start a session</div>
+            <div style={{ color: "var(--muted)", marginTop: 6, lineHeight: 1.5 }}>
+              Read sentences like a book, or review them with spaced repetition.
+            </div>
+
+            <div className="segmented" style={{ marginTop: 16 }}>
+              <button
+                className={"segBtn " + (pathProg?.mode !== "srs" ? "active" : "")}
+                onClick={() => toggleMode("linear")}
+              >
+                Read
+              </button>
+              <button
+                className={"segBtn " + (pathProg?.mode === "srs" ? "active" : "")}
+                onClick={() => toggleMode("srs")}
+              >
+                Review
+              </button>
+            </div>
+
+            <div className="row" style={{ marginTop: 18, gap: 12, flexWrap: "wrap" }}>
+              {sentenceCount === 0 ? (
+                <button
+                  className="btn primary heroBtn"
+                  onClick={() => {
+                    setForceImportTips(true);
+                    setView("library");
+                  }}
+                >
+                  Add sentences
+                </button>
+              ) : (
+                <button className="btn primary heroBtn" onClick={() => setView("practice")}>
+                  Start practice
+                </button>
+              )}
+
+              <button className="btn" onClick={() => setShowNewLanguage(true)}>
+                Add language
+              </button>
+
+              <button
+                className="btn"
+                onClick={() => {
+                  setForceImportTips(false);
+                  setView("library");
+                }}
+              >
+                Library
+              </button>
+            </div>
+
+            <div style={{ marginTop: 14, color: "var(--muted)", fontSize: 13 }}>
+              Current library: <strong>{sentenceCount}</strong> sentences • Due: <strong>{dueCount}</strong>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {view === "practice" ? (
+        <div style={{ marginTop: 6 }}>
+          <SentenceCard
+            row={row}
+            showSource={showSource}
+            showTranslit={showTranslit}
+            showGloss={showGloss}
+            rtl={rtl}
+            fontScale={fontScale}
+            languageName={dataset?.name}
+          />
+
+          <div className="actionBar" style={{ marginTop: 14 }}>
+            {pathProg?.mode === "srs" ? (
+              <>
+                <button className="btn" onClick={() => setView("home")}>Home</button>
+                <button className="btn" onClick={playCurrent}>Play</button>
+                <button className="btn" onClick={() => rateSRS("again")}>Again</button>
+                <button className="btn primary" onClick={() => rateSRS("good")}>Good</button>
+                <button className="btn" onClick={() => rateSRS("easy")}>Easy</button>
+              </>
+            ) : (
+              <>
+                <button className="btn" onClick={() => setView("home")}>Home</button>
+                <button className="btn" onClick={() => bumpLinear(-1, false)}>
+                  Prev
+                </button>
+                <button className="btn primary" onClick={playCurrent}>
+                  Play
+                </button>
+                <button className="btn" onClick={() => bumpLinear(1, true)}>
+                  Next
+                </button>
+                <button className={"btn " + (autoRun ? "primary" : "")} onClick={() => setAutoRun((v) => !v)}>
+                  Auto
+                </button>
+              </>
             )}
           </div>
 
-          <div className="row">
-            <div className="progressOuter" aria-label="Progress">
-              <div className="progressInner" style={{ width: `${Math.round(pct * 100)}%` }} />
-            </div>
-            <span className="pill">{Math.round(pct * 100)}%</span>
-          </div>
-        </div>
-
-        <div className="row" style={{ marginTop: 12, gap: 10, flexWrap: "wrap" }}>
-          <span className="pill">Study mode</span>
-          <select
-            className="btn"
-            value={pathProg?.mode ?? "linear"}
-            onChange={async (e) => toggleMode(e.target.value as any)}
-          >
-            <option value="linear">Go straight through (Linear)</option>
-            <option value="srs">Spaced repetition (Anki-style)</option>
-          </select>
-
-          <span className="pill">Show</span>
-          <button className="btn" onClick={() => setShowSource((v) => !v)}>
-            English {showSource ? "✓" : "—"}
-          </button>
-          <button className="btn" onClick={() => setShowTranslit((v) => !v)}>
-            Transliteration {showTranslit ? "✓" : "—"}
-          </button>
-          <button className="btn" onClick={() => setShowGloss((v) => !v)}>
-            Gloss {showGloss ? "✓" : "—"}
-          </button>
-        </div>
-      </div>
-
-      {showOnboarding && (
-        <div className="panel" style={{ padding: 16, marginTop: 12 }}>
-          <div className="row" style={{ justifyContent: "space-between", alignItems: "center", gap: 10 }}>
-            <div>
-              <div style={{ fontWeight: 800, fontSize: 16 }}>Quick start</div>
-              <div style={{ color: "var(--muted)", fontSize: 13 }}>Two steps, then you’re in flow.</div>
-            </div>
+          <div className="miniRow" style={{ marginTop: 12 }}>
+            <button className="chip" onClick={() => setShowSource((v) => !v)}>
+              {showSource ? "Hide English" : "Show English"}
+            </button>
+            {(showTranslit || rowHasTranslit) ? (
+              <button className="chip" onClick={() => setShowTranslit((v) => !v)}>
+                {showTranslit ? "Hide translit" : "Show translit"}
+              </button>
+            ) : null}
+            {(showGloss || rowHasGloss) ? (
+              <button className="chip" onClick={() => setShowGloss((v) => !v)}>
+                {showGloss ? "Hide gloss" : "Show gloss"}
+              </button>
+            ) : null}
             <button
-              className="btn"
+              className="chip"
               onClick={() => {
-                localStorage.setItem("lemmapath_hide_onboarding", "1");
-                setShowOnboarding(false);
+                if (!row?.targetText) return;
+                navigator.clipboard.writeText(row.targetText).then(() => showToast("Copied"));
               }}
             >
-              Hide forever
+              Copy target
             </button>
           </div>
-
-          <ol style={{ margin: "10px 0 0 18px", color: "var(--muted)", lineHeight: 1.65 }}>
-            <li>
-              <strong>Import</strong> a spreadsheet (CSV / TSV / XLSX). Use the big “Choose file” button.
-            </li>
-            <li>
-              <strong>Practice</strong>: use <span className="kbd">Linear</span> to go straight through, or{" "}
-              <span className="kbd">Spaced</span> for an Anki‑style review loop.
-            </li>
-          </ol>
         </div>
-      )}
+      ) : null}
 
-      <PracticeCard
-        row={card.row}
-        showSource={showSource}
-        showTranslit={showTranslit}
-        showGloss={showGloss}
-        rtl={rtl}
-        fontScale={fontScale}
-        languageName={dataset.name}
-        onImportClick={openImportPicker}
-        onToggleTranslit={() => setShowTranslit((v) => !v)}
-        onToggleGloss={() => setShowGloss((v) => !v)}
-        spotlightTrigger={card.row?.order ?? 0}
-        onCopyTarget={async () => {
-          if (!card.row) return;
-          try {
-            await navigator.clipboard.writeText(card.row.targetText);
-            showToast("Copied target.");
-          } catch {
-            showToast("Copy failed.");
-          }
-        }}
-        onCopySource={async () => {
-          if (!card.row) return;
-          try {
-            await navigator.clipboard.writeText(card.row.sourceText);
-            showToast("Copied source.");
-          } catch {
-            showToast("Copy failed.");
-          }
-        }}
-        onCopyBoth={async () => {
-          if (!card.row) return;
-          try {
-            await navigator.clipboard.writeText(`${card.row.sourceText}\n${card.row.targetText}`);
-            showToast("Copied both.");
-          } catch {
-            showToast("Copy failed.");
-          }
-        }}
-      />
+      {view === "library" ? (
+        <div style={{ marginTop: 18 }}>
+          <div className="panel" style={{ padding: 18 }}>
+            <div className="row" style={{ justifyContent: "space-between", alignItems: "center", gap: 10 }}>
+              <div>
+                <div style={{ fontWeight: 900, fontSize: 18 }}>Library</div>
+                <div style={{ color: "var(--muted)", fontSize: 13, marginTop: 4 }}>
+                  Import sentences, add languages, and manage backups.
+                </div>
+              </div>
+              <div className="row" style={{ gap: 10, flexWrap: "wrap", justifyContent: "flex-end" }}>
+                <button className="btn" onClick={() => setShowNewLanguage(true)}>
+                  New language
+                </button>
+                <button
+                  className="btn"
+                  onClick={() => {
+                    setForceImportTips(false);
+                    setView("home");
+                  }}
+                >
+                  Done
+                </button>
+              </div>
+            </div>
 
-      <div className="actionBar">
-        {pathProg?.mode === "linear" ? (
-          <>
-            <button className="btn" onClick={() => bumpLinear(-1, false)} disabled={!card.row}>
-              Prev
-            </button>
-            <button className="btn" onClick={playAudio} disabled={!card.row}>
-              {isIOS && !unlocked ? "Unlock audio" : "Play"}
-            </button>
-            <button className="btn primary" onClick={() => bumpLinear(1, true)} disabled={!card.row}>
-              Next
-            </button>
-          </>
-        ) : (
-          <>
-            <button className="btn" onClick={() => rateSRS("again")} disabled={!card.row}>
-              Again
-            </button>
-            <button className="btn" onClick={playAudio} disabled={!card.row}>
-              {isIOS && !unlocked ? "Unlock audio" : "Play"}
-            </button>
-            <button className="btn primary" onClick={() => rateSRS("good")} disabled={!card.row}>
-              Good
-            </button>
-            <button className="btn" onClick={() => rateSRS("easy")} disabled={!card.row}>
-              Easy
-            </button>
-          </>
-        )}
-      </div>
+            <div className="row" style={{ marginTop: 12, gap: 10, flexWrap: "wrap" }}>
+              <div style={{ width: "100%" }}>
+                <div className="sectionLabel">Step one — Choose language and path</div>
+                <div className="sectionHint">Imports go into the selected path.</div>
+              </div>
 
-      <div ref={importSectionRef}>
-      <ImportPanel
-        dataset={dataset}
-        deck={deck}
-        decks={decks}
-        fileInputRef={importFileInputRef}
-        onToast={showToast}
-        onSelectDeck={async (deckId) => {
-          localStorage.setItem("lemmapath_deckId", deckId);
-          const nextDeck = decks.find((d) => d.id === deckId) ?? null;
-          if (!nextDeck) return;
-          setDeck(nextDeck);
-          await refresh(dataset, nextDeck);
-        }}
-        onCreateDeck={async () => {
-          const name = prompt("Path name (example: News articles B1)")?.trim();
-          if (!name) return;
-          const dk = await createDeck(dataset.id, name);
-          await ensurePathProgress(dataset.id, dk.id);
-          await loadLibrary(dataset.id, dk.id);
-        }}
-        onImported={async () => {
-          await refresh(dataset, deck);
-        }}
-      />
-      </div>
+              <select className="btn" value={datasetId} onChange={(e) => setDatasetId(e.target.value)} style={{ minWidth: 220 }}>
+                {datasets.map((d) => (
+                  <option key={d.id} value={d.id}>
+                    {d.name}
+                  </option>
+                ))}
+              </select>
 
-      {showSettings && (
-        <>
-          <SettingsDrawer
-            dataset={dataset}
-            voices={voices}
-            onUpdate={async (patch) => {
-              const next = { ...dataset, ...patch };
-              await db.datasets.put(next);
-              setDataset(next);
-            }}
-          />
+              <select
+                className="btn"
+                value={deckId}
+                onChange={(e) => setDeckId(e.target.value)}
+                style={{ minWidth: 220 }}
+              >
+                {decks.map((d) => (
+                  <option key={d.id} value={d.id}>
+                    {d.name}
+                  </option>
+                ))}
+              </select>
 
-          <div className="panel" style={{ padding: 16, marginTop: 12 }}>
-            <div style={{ fontWeight: 700, marginBottom: 10 }}>Backup / Restore</div>
-            <div className="row" style={{ gap: 10, flexWrap: "wrap" }}>
               <button
                 className="btn"
                 onClick={async () => {
-                  const json = await exportAllToJSON();
-                  const blob = new Blob([json], { type: "application/json" });
-                  const url = URL.createObjectURL(blob);
-                  const a = document.createElement("a");
-                  a.href = url;
-                  a.download = "lemmapath-backup.json";
-                  a.click();
-                  URL.revokeObjectURL(url);
-
-                  localStorage.setItem("lemmapath_last_backup_at", String(Date.now()));
-                  showToast("Backup downloaded.");
+                  if (!dataset) return;
+                  const name = prompt("New path name (for this language):", "Main");
+                  if (!name) return;
+                  const nd = await createDeck(dataset.id, name);
+                  await ensurePathProgress(dataset.id, nd.id);
+                  const nextDecks = await db.decks.where("datasetId").equals(dataset.id).sortBy("createdAt");
+                  setDecks(nextDecks);
+                  setDeckId(nd.id);
                 }}
               >
-                Download backup (JSON)
+                New path
               </button>
-
-              <label className="btn" style={{ cursor: "pointer" }}>
-                Restore from backup
-                <input
-                  type="file"
-                  accept="application/json"
-                  style={{ display: "none" }}
-                  onChange={async (e) => {
-                    const f = e.target.files?.[0];
-                    if (!f) return;
-                    try {
-                      const text = await f.text();
-                      await importAllFromJSON(text);
-                      localStorage.setItem("lemmapath_last_backup_at", String(Date.now()));
-                      await loadLibrary();
-                      showToast("Restore complete.");
-                    } catch (err: any) {
-                      showToast(err?.message ?? "Restore failed.");
-                    }
-                  }}
-                />
-              </label>
             </div>
 
-            <div style={{ marginTop: 10, color: "var(--muted)", fontSize: 13 }}>
-              Tip: if your library is huge, backups can be large. That’s normal — it’s your local database.
+            {dataset && deck ? (
+              <div style={{ marginTop: 14 }}>
+                <div className="sectionLabel">Step two — Import sentences</div>
+                <div className="sectionHint">Upload a CSV / TSV / XLSX with at least English and Target.</div>
+
+              <ImportPanel
+                dataset={dataset}
+                deck={deck}
+                decks={decks}
+                onSelectDeck={setDeckId}
+                onCreateDeck={() => {}}
+                showPickers={false}
+                forceShowTips={forceImportTips}
+                onImported={async () => {
+                  await refreshCounts();
+                  await pickCurrent();
+                  setForceImportTips(false);
+                  showToast("Imported");
+                }}
+                onToast={showToast}
+              />
+              </div>
+            ) : null}
+
+            <div className="panel" style={{ padding: 14, marginTop: 12 }}>
+              <div className="sectionLabel">Step three — Backup (recommended)</div>
+              <div className="sectionHint">Sentence Paths is local-first. Back up your library before switching devices or clearing browser data.</div>
+
+              <div className="row" style={{ marginTop: 10, gap: 10, flexWrap: "wrap" }}>
+                <button
+                  className="btn"
+                  onClick={async () => {
+                    const { exportAllToJSON } = await import("./data/backup");
+                    const json = await exportAllToJSON();
+                    downloadText("sentencepaths_backup.json", json, "application/json");
+                    showToast("Backup downloaded");
+                  }}
+                >
+                  Download backup
+                </button>
+                <button
+                  className="btn"
+                  onClick={async () => {
+                    const inp = document.createElement("input");
+                    inp.type = "file";
+                    inp.accept = ".json,application/json";
+                    inp.onchange = async () => {
+                      const f = inp.files?.[0];
+                      if (!f) return;
+                      const txt = await f.text();
+                      const { importAllFromJSON } = await import("./data/backup");
+                      await importAllFromJSON(txt);
+                      await loadAll();
+                      await refreshCounts();
+                      await pickCurrent();
+                      showToast("Restored");
+                    };
+                    inp.click();
+                  }}
+                >
+                  Restore backup
+                </button>
+              </div>
             </div>
           </div>
-        </>
-      )}
 
-      {toast && (
-        <div className="toast" role="status" aria-live="polite">
-          {toast}
+          <div style={{ marginTop: 12 }}>
+            <button className="btn btn-small" onClick={() => setShowAdvancedLanguages((v) => !v)}>
+              {showAdvancedLanguages ? "Hide advanced tools" : "Advanced tools"}
+            </button>
+          </div>
+
+          {showAdvancedLanguages ? (
+            <LanguageManager
+              languages={datasets}
+              currentLanguageId={datasetId}
+              onAddLanguage={async (name, tag) => {
+                await createLanguage(name, tag);
+              }}
+              onRenameLanguage={async (id, newName) => {
+                const d = await db.datasets.get(id);
+                if (!d) return;
+                await db.datasets.put({ ...d, name: newName });
+                const all = await db.datasets.orderBy("createdAt").toArray();
+                setDatasets(all);
+                showToast("Renamed");
+              }}
+              onDeleteLanguage={async (id, reassignToId) => {
+                if (id === reassignToId) return;
+                const sents = await db.sentences.where("datasetId").equals(id).toArray();
+                const reassigned = sents.map((s) => ({ ...s, datasetId: reassignToId }));
+                await db.transaction("rw", [db.sentences, db.datasets], async () => {
+                  if (reassigned.length) await db.sentences.bulkPut(reassigned);
+                  await db.datasets.delete(id);
+                });
+                const all = await db.datasets.orderBy("createdAt").toArray();
+                setDatasets(all);
+                if (datasetId === id) setDatasetId(reassignToId);
+                showToast("Deleted");
+              }}
+            />
+          ) : null}
         </div>
-      )}
+      ) : null}
+
+      <Modal open={showNewLanguage} title="New language" onClose={() => setShowNewLanguage(false)}>
+        <div className="helpStack">
+          <div style={{ color: "var(--muted)", lineHeight: 1.5 }}>
+            Add a language, then import a sheet of sentences. Minimum columns: <strong>English</strong> and <strong>Target</strong>.
+          </div>
+
+          <div className="panel" style={{ padding: 14 }}>
+            <div style={{ fontWeight: 800, marginBottom: 8 }}>Language name</div>
+            <input
+              className="btn"
+              value={newLanguageName}
+              onChange={(e) => setNewLanguageName(e.target.value)}
+              placeholder="e.g., French"
+              style={{ width: "100%" }}
+            />
+
+            <div style={{ fontWeight: 800, marginTop: 12, marginBottom: 8 }}>Language tag (optional)</div>
+            <input
+              className="btn"
+              value={newLanguageTag}
+              onChange={(e) => setNewLanguageTag(e.target.value)}
+              placeholder="e.g., fr-FR"
+              style={{ width: "100%" }}
+            />
+
+            <div className="row" style={{ justifyContent: "flex-end", gap: 10, marginTop: 14, flexWrap: "wrap" }}>
+              <button className="btn" onClick={() => setShowNewLanguage(false)}>
+                Cancel
+              </button>
+              <button
+                className="btn primary"
+                onClick={async () => {
+                  const nm = newLanguageName.trim();
+                  if (!nm) {
+                    showToast("Please enter a language name");
+                    return;
+                  }
+                  await createLanguage(nm, newLanguageTag.trim());
+                  setNewLanguageName("");
+                  setNewLanguageTag("");
+                  setShowNewLanguage(false);
+                }}
+              >
+                Create
+              </button>
+            </div>
+          </div>
+        </div>
+      </Modal>
+
+      <Modal open={showHelp} title="Help & setup" onClose={() => setShowHelp(false)}>
+        <div className="helpStack">
+          <div>
+            <div style={{ fontWeight: 900, marginBottom: 6 }}>The flow</div>
+            <ol style={{ margin: 0, paddingLeft: 18, color: "var(--muted)" }}>
+              <li>If a language is empty, press <strong>Add sentences</strong>.</li>
+              <li>Press <strong>Start practice</strong>.</li>
+              <li>Choose <strong>Read</strong> for "book mode" or <strong>Review</strong> for spaced repetition.</li>
+              <li>Use <strong>Library</strong> to add languages, import, and back up.</li>
+            </ol>
+          </div>
+
+          <div className="panel" style={{ padding: 14 }}>
+            <div style={{ fontWeight: 900, marginBottom: 6 }}>Backup reminder</div>
+            <div style={{ color: "var(--muted)", lineHeight: 1.5 }}>
+              Sentence Paths is local-first. Back up your library regularly: <strong>Library → Backup</strong>.
+            </div>
+          </div>
+
+          <div>
+            <div style={{ fontWeight: 900, marginBottom: 6 }}>Install as an app</div>
+            <InstallCard />
+          </div>
+        </div>
+      </Modal>
+
+      <Modal open={showSettings} title="Settings" onClose={() => setShowSettings(false)}>
+        {dataset ? (
+          <SettingsDrawer
+            dataset={dataset}
+            onUpdate={async (patch) => {
+              const next = { ...dataset, ...patch };
+              await db.datasets.put(next);
+              const all = await db.datasets.orderBy("createdAt").toArray();
+              setDatasets(all);
+              showToast("Saved");
+            }}
+            voices={tts.voices}
+          />
+        ) : null}
+
+        {tts.isIOS && !tts.unlocked ? (
+          <div className="panel" style={{ padding: 14, marginTop: 12 }}>
+            <div style={{ fontWeight: 900, marginBottom: 6 }}>Unlock TTS on iOS</div>
+            <div style={{ color: "var(--muted)", lineHeight: 1.5 }}>
+              iOS requires a user tap before speech can play. Tap the button once, then use <strong>Play</strong>.
+            </div>
+            <div style={{ marginTop: 10 }}>
+              <button
+                className="btn primary"
+                onClick={() => {
+                  tts.prime();
+                  showToast("TTS unlocked");
+                }}
+              >
+                Unlock
+              </button>
+            </div>
+          </div>
+        ) : null}
+
+        <div className="panel" style={{ padding: 14, marginTop: 12 }}>
+          <div style={{ fontWeight: 900, marginBottom: 10 }}>Auto settings</div>
+          <div className="row" style={{ gap: 10, flexWrap: "wrap" }}>
+            <button className={"btn " + (ttsEnglish ? "primary" : "")} onClick={() => setTTSEnglish((v) => !v)}>
+              {ttsEnglish ? "English TTS: on" : "English TTS: off"}
+            </button>
+            <button className={"btn " + (autoAfter === "audio" ? "primary" : "")} onClick={() => setAutoAfter("audio")}>
+              Auto after audio
+            </button>
+            <button className={"btn " + (autoAfter === "delay" ? "primary" : "")} onClick={() => setAutoAfter("delay")}>
+              Auto after delay
+            </button>
+            <div className="row" style={{ gap: 8, alignItems: "center" }}>
+              <span style={{ color: "var(--muted)", fontSize: 13 }}>Delay</span>
+              <input
+                className="btn"
+                type="number"
+                step={0.5}
+                min={0}
+                max={10}
+                value={autoDelaySec}
+                onChange={(e) => setAutoDelaySec(clamp(parseFloat(e.target.value || "0"), 0, 10))}
+                style={{ width: 92 }}
+              />
+              <span style={{ color: "var(--muted)", fontSize: 13 }}>sec</span>
+            </div>
+          </div>
+        </div>
+      </Modal>
+
+      {toast ? <div className="toast">{toast.msg}</div> : null}
+
+      <footer style={{ marginTop: 30, color: "var(--muted)", fontSize: 12, textAlign: "center" }}>
+        {uniqueWords ? <span>Unique target words seen: {uniqueWords}</span> : null}
+      </footer>
     </div>
   );
 }

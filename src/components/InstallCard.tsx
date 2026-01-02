@@ -32,9 +32,9 @@ export function InstallCard() {
     <div className="panel" style={{ padding: 16, marginTop: 12 }}>
       <div className="row" style={{ justifyContent: "space-between" }}>
         <div style={{ maxWidth: 700 }}>
-          <div style={{ fontWeight: 700, marginBottom: 4 }}>Install LemmaPath</div>
+          <div style={{ fontWeight: 700, marginBottom: 4 }}>Install Sentence Paths</div>
           <div style={{ color: "var(--muted)", fontSize: 14 }}>
-            Works offline after first load. Install it like an app for faster access.
+            Works offline after the first load. Install it like an app for faster access.
           </div>
         </div>
 

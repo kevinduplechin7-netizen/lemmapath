@@ -13,10 +13,9 @@ export function SettingsDrawer(props: {
 
       <div className="row">
         <span className="pill">Theme</span>
-        <select className="btn" value={lang.theme} onChange={(e) => props.onUpdate({ theme: e.target.value as any })}>
-          <option value="paper">Paper</option>
-          <option value="desk">Desk</option>
-          <option value="dark">Dark desk</option>
+        <select className="btn" value={lang.theme === "dark" ? "dark" : "paper"} onChange={(e) => props.onUpdate({ theme: e.target.value as any })}>
+          <option value="paper">Light (glossy)</option>
+          <option value="dark">Dark</option>
         </select>
 
         <span className="pill">Direction</span>

@@ -1,4 +1,4 @@
-import { db, makeId, type Deck, type PathProgressRow } from "./db";
+import { db, type Deck, type PathProgressRow, type DatasetStatsRow, type SeenWordRow } from "./db";
 
 export async function exportAllToJSON(): Promise<string> {
   const datasets = await db.datasets.toArray();
@@ -8,8 +8,10 @@ export async function exportAllToJSON(): Promise<string> {
   const progress = await db.progress.toArray(); // legacy
   const pathProgress = await db.pathProgress.toArray();
   const srs = await db.srs.toArray();
+  const stats = await db.stats.toArray();
+  const seenWords = await db.seenWords.toArray();
 
-  return JSON.stringify({ datasets, decks, imports, sentences, progress, pathProgress, srs }, null, 2);
+  return JSON.stringify({ datasets, decks, imports, sentences, progress, pathProgress, srs, stats, seenWords }, null, 2);
 }
 
 function ensureDecksForImport(datasets: any[], decks: any[]): Deck[] {
@@ -48,6 +50,9 @@ export async function importAllFromJSON(jsonText: string) {
 
   const pathProgressIn = (parsed.pathProgress ?? []) as any[];
   const srs = (parsed.srs ?? []) as any[];
+
+  const statsIn = (parsed.stats ?? []) as DatasetStatsRow[];
+  const seenWordsIn = (parsed.seenWords ?? []) as SeenWordRow[];
 
   const decks = ensureDecksForImport(datasets, decksIn);
 
@@ -102,9 +107,14 @@ export async function importAllFromJSON(jsonText: string) {
     }
   }
 
+  // If stats missing, seed empty rows.
+  const stats: DatasetStatsRow[] = statsIn.length
+    ? statsIn
+    : datasets.map((ds) => ({ datasetId: ds.id, uniqueWordsSeen: 0, updatedAt: Date.now() }));
+
   await db.transaction(
     "rw",
-    [db.datasets, db.decks, db.imports, db.sentences, db.progress, db.pathProgress, db.srs],
+    [db.datasets, db.decks, db.imports, db.sentences, db.progress, db.pathProgress, db.srs, db.stats, db.seenWords],
     async () => {
       await db.datasets.clear();
       await db.decks.clear();
@@ -113,6 +123,8 @@ export async function importAllFromJSON(jsonText: string) {
       await db.progress.clear();
       await db.pathProgress.clear();
       await db.srs.clear();
+      await db.stats.clear();
+      await db.seenWords.clear();
 
       await db.datasets.bulkPut(datasets);
       await db.decks.bulkPut(decks);
@@ -134,7 +146,9 @@ export async function importAllFromJSON(jsonText: string) {
 
       await db.pathProgress.bulkPut(pathProgress as any);
       if (srs.length) await db.srs.bulkPut(srs);
+
+      await db.stats.bulkPut(stats as any);
+      if (seenWordsIn.length) await db.seenWords.bulkPut(seenWordsIn as any);
     }
   );
 }
-

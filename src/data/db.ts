@@ -1,4 +1,5 @@
 import Dexie, { type Table } from "dexie";
+import { countTokens } from "./tokenize";
 
 export type Dataset = {
   id: string;
@@ -105,7 +106,20 @@ export type SRSRow = {
   updatedAt: number;
 };
 
-export class LemmaDB extends Dexie {
+// New: dataset-wide word tracking (approx "words read")
+export type SeenWordRow = {
+  datasetId: string;
+  token: string;
+  firstSeenAt: number;
+};
+
+export type DatasetStatsRow = {
+  datasetId: string;
+  uniqueWordsSeen: number;
+  updatedAt: number;
+};
+
+export class SentencePathsDB extends Dexie {
   datasets!: Table<Dataset, string>;
   decks!: Table<Deck, string>;
   imports!: Table<ImportBatchRow, string>;
@@ -115,14 +129,21 @@ export class LemmaDB extends Dexie {
   // Legacy progress (dataset-wide). Kept to avoid breaking old backups.
   progress!: Table<ProgressRow, string>;
 
-  // New: per-path progress
+  // Per-path progress
   pathProgress!: Table<PathProgressRow, [string, string]>;
 
-  // New: per-path SRS state
+  // Per-path SRS state
   srs!: Table<SRSRow, [string, string, string]>;
 
+  // New: word stats
+  seenWords!: Table<SeenWordRow, [string, string]>;
+  stats!: Table<DatasetStatsRow, string>;
+
   constructor() {
-    super("lemmapath_db");
+    // Use a new DB name for the rebrand so Sentence Paths starts clean.
+    // This avoids inheriting partially-migrated LemmaPath data that can
+    // lead to blank target text and silent TTS failures.
+    super("sentencepaths_db");
 
     // v1 schema (legacy)
     this.version(1).stores({
@@ -206,10 +227,156 @@ export class LemmaDB extends Dexie {
           }
         }
       });
+
+    // v3: dataset-wide word tracking
+    this.version(3)
+      .stores({
+        datasets: "id, name, languageTag, createdAt",
+
+        decks: "id, datasetId, createdAt, [datasetId+createdAt]",
+        imports: "id, datasetId, deckId, createdAt, [datasetId+deckId+createdAt]",
+
+        sentences:
+          "id, datasetId, deckId, order, importId, [datasetId+deckId], [datasetId+deckId+order], [datasetId+deckId+importId]",
+
+        progress: "datasetId",
+
+        pathProgress: "&[datasetId+deckId], datasetId, deckId, updatedAt",
+        srs: "&[datasetId+deckId+sentenceId], datasetId, deckId, dueAt, [datasetId+deckId+dueAt]",
+
+        seenWords: "&[datasetId+token], datasetId, firstSeenAt",
+        stats: "datasetId, updatedAt"
+      })
+      .upgrade(async (tx) => {
+        const datasets = (await tx.table("datasets").toArray()) as any[];
+        const statsTable = tx.table("stats");
+
+        for (const ds of datasets) {
+          const existing = await statsTable.get(ds.id).catch(() => undefined);
+          if (!existing) {
+            await statsTable.put({ datasetId: ds.id, uniqueWordsSeen: 0, updatedAt: Date.now() });
+          }
+        }
+      });
+
+    // v4: repair legacy sentence fields + token counts, and normalize linear orders
+    this.version(4)
+      .stores({
+        datasets: "id, name, languageTag, createdAt",
+
+        decks: "id, datasetId, createdAt, [datasetId+createdAt]",
+        imports: "id, datasetId, deckId, createdAt, [datasetId+deckId+createdAt]",
+
+        sentences:
+          "id, datasetId, deckId, order, importId, [datasetId+deckId], [datasetId+deckId+order], [datasetId+deckId+importId]",
+
+        progress: "datasetId",
+
+        pathProgress: "&[datasetId+deckId], datasetId, deckId, updatedAt",
+        srs: "&[datasetId+deckId+sentenceId], datasetId, deckId, dueAt, [datasetId+deckId+dueAt]",
+
+        seenWords: "&[datasetId+token], datasetId, firstSeenAt",
+        stats: "datasetId, updatedAt"
+      })
+      .upgrade(async (tx) => {
+        const datasets = (await tx.table("datasets").toArray()) as any[];
+        const decks = (await tx.table("decks").toArray()) as any[];
+        const statsTable = tx.table("stats");
+
+        const cjkByDataset = new Map<string, boolean>();
+        for (const ds of datasets) {
+          cjkByDataset.set(ds.id, !!ds.cjkMode);
+          const existing = await statsTable.get(ds.id).catch(() => undefined);
+          if (!existing) {
+            await statsTable.put({ datasetId: ds.id, uniqueWordsSeen: 0, updatedAt: Date.now() });
+          }
+        }
+
+        // Repair sentence fields + tokenCount (covers older LemmaPath exports)
+        const sentencesTable = tx.table("sentences");
+        await sentencesTable.toCollection().modify((s: any) => {
+          const cjk = cjkByDataset.get(s.datasetId) ?? false;
+
+          const sourceCandidate =
+            s.sourceText ??
+            s.english ??
+            s.source ??
+            s.en ??
+            s.front ??
+            s.prompt ??
+            "";
+          const targetCandidate =
+            s.targetText ??
+            s.target ??
+            s.answer ??
+            s.back ??
+            s.text ??
+            s.sentence ??
+            s.Target ??
+            "";
+
+          if ((!s.sourceText || !String(s.sourceText).trim()) && typeof sourceCandidate === "string" && sourceCandidate.trim()) {
+            s.sourceText = sourceCandidate;
+          }
+          if ((!s.targetText || !String(s.targetText).trim()) && typeof targetCandidate === "string" && targetCandidate.trim()) {
+            s.targetText = targetCandidate;
+          }
+          if (!s.transliterationText && typeof s.transliteration === "string") s.transliterationText = s.transliteration;
+          if (!s.glossText && typeof s.gloss === "string") s.glossText = s.gloss;
+
+          if (typeof s.order !== "number" || !Number.isFinite(s.order)) {
+            s.order = 0;
+          }
+
+          const tt = String(s.targetText ?? "");
+          if (typeof s.tokenCount !== "number" || !Number.isFinite(s.tokenCount) || s.tokenCount <= 0) {
+            s.tokenCount = countTokens(tt, cjk);
+          }
+        });
+
+        // Normalize order per deck (guarantees dense [zero..n-1] even if older imports had gaps)
+        const lastOrderByKey = new Map<string, number>();
+        for (const d of decks) {
+          const rows = (await sentencesTable.where("[datasetId+deckId]").equals([d.datasetId, d.id]).toArray()) as any[];
+          rows.sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || String(a.id).localeCompare(String(b.id)));
+          let changed = false;
+          rows.forEach((r, idx) => {
+            if (r.order !== idx) {
+              r.order = idx;
+              changed = true;
+            }
+          });
+          if (changed && rows.length) {
+            await sentencesTable.bulkPut(rows);
+          }
+          lastOrderByKey.set(`${d.datasetId}__${d.id}`, Math.max(0, rows.length - 1));
+        }
+
+        // Clamp linear pointers so the reader always lands on a real row.
+        const ppTable = tx.table("pathProgress");
+        const allPP = (await ppTable.toArray()) as any[];
+        let ppChanged = false;
+        for (const pp of allPP) {
+          const key = `${pp.datasetId}__${pp.deckId}`;
+          const last = lastOrderByKey.get(key);
+          if (typeof last !== "number") continue;
+          if (typeof pp.linearOrder === "number" && pp.linearOrder > last) {
+            pp.linearOrder = last;
+            ppChanged = true;
+          }
+          if (typeof pp.srsNewOrder === "number" && pp.srsNewOrder > last) {
+            pp.srsNewOrder = last;
+            ppChanged = true;
+          }
+        }
+        if (ppChanged) {
+          await ppTable.bulkPut(allPP);
+        }
+      });
   }
 }
 
-export const db = new LemmaDB();
+export const db = new SentencePathsDB();
 
 export function makeId(prefix: string) {
   return `${prefix}_${crypto.randomUUID()}`;
@@ -245,6 +412,9 @@ export async function createDataset(opts?: Partial<Pick<Dataset, "name" | "langu
   const deck = await createDeck(ds.id, "Main");
   await ensurePathProgress(ds.id, deck.id);
 
+  // Seed stats
+  await ensureDatasetStats(ds.id);
+
   return ds;
 }
 
@@ -259,18 +429,39 @@ export async function createDeck(datasetId: string, name: string): Promise<Deck>
   return deck;
 }
 
+// ---- Defaults (guarded to avoid duplicate creation in React Strict Mode) ----
+let ensureDefaultDatasetPromise: Promise<Dataset> | null = null;
+let ensureDefaultDeckPromiseByDs = new Map<string, Promise<Deck>>();
+
 export async function ensureDefaultDataset(): Promise<Dataset> {
-  const first = await db.datasets.toCollection().first();
-  if (first) return first;
-  return await createDataset({ name: "Default", languageTag: "el-GR" });
+  if (ensureDefaultDatasetPromise) return ensureDefaultDatasetPromise;
+
+  ensureDefaultDatasetPromise = (async () => {
+    const first = await db.datasets.toCollection().first();
+    if (first) return first;
+
+    // First run: create a friendly sample language so the app is usable immediately.
+    return await createDataset({ name: "Sample (Greek)", languageTag: "el-GR" });
+  })();
+
+  return ensureDefaultDatasetPromise;
 }
 
 export async function ensureDefaultDeck(datasetId: string): Promise<Deck> {
-  const existing = await db.decks.where("datasetId").equals(datasetId).sortBy("createdAt");
-  if (existing.length) return existing[0];
-  const deck = await createDeck(datasetId, "Main");
-  await ensurePathProgress(datasetId, deck.id);
-  return deck;
+  const existing = ensureDefaultDeckPromiseByDs.get(datasetId);
+  if (existing) return existing;
+
+  const p = (async () => {
+    const decks = await db.decks.where("datasetId").equals(datasetId).sortBy("createdAt");
+    if (decks.length) return decks[0];
+
+    const deck = await createDeck(datasetId, "Main");
+    await ensurePathProgress(datasetId, deck.id);
+    return deck;
+  })();
+
+  ensureDefaultDeckPromiseByDs.set(datasetId, p);
+  return p;
 }
 
 export async function ensurePathProgress(datasetId: string, deckId: string): Promise<PathProgressRow> {
@@ -290,6 +481,42 @@ export async function ensurePathProgress(datasetId: string, deckId: string): Pro
   };
   await db.pathProgress.put(pp);
   return pp;
+}
+
+export async function ensureDatasetStats(datasetId: string): Promise<DatasetStatsRow> {
+  const existing = await db.stats.get(datasetId).catch(() => undefined);
+  if (existing) return existing;
+  const row: DatasetStatsRow = { datasetId, uniqueWordsSeen: 0, updatedAt: Date.now() };
+  await db.stats.put(row);
+  return row;
+}
+
+export async function recordTokensSeen(datasetId: string, tokens: string[]): Promise<number> {
+  const uniq = Array.from(new Set(tokens.map((t) => t.trim()).filter(Boolean)));
+  if (uniq.length === 0) return 0;
+
+  const keys = uniq.map((t) => [datasetId, t] as [string, string]);
+  const existing = await db.seenWords.bulkGet(keys);
+
+  const now = Date.now();
+  const toAdd: SeenWordRow[] = [];
+
+  for (let i = 0; i < uniq.length; i++) {
+    if (!existing[i]) toAdd.push({ datasetId, token: uniq[i], firstSeenAt: now });
+  }
+
+  if (toAdd.length) {
+    await db.seenWords.bulkPut(toAdd);
+
+    const stats = await ensureDatasetStats(datasetId);
+    await db.stats.put({
+      ...stats,
+      uniqueWordsSeen: stats.uniqueWordsSeen + toAdd.length,
+      updatedAt: now
+    });
+  }
+
+  return toAdd.length;
 }
 
 export async function getSentenceCount(datasetId: string, deckId: string): Promise<number> {

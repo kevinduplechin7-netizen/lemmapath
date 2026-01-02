@@ -1,12 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { Dataset, Deck } from "../data/db";
-import {
-  importCSVorTSV,
-  importXLSX,
-  listSheetNames,
-  type ImportMapping,
-  type ImportMode
-} from "../data/importers";
+import type { ImportMapping, ImportMode } from "../data/importers";
 
 function extOf(name: string) {
   const parts = name.toLowerCase().split(".");
@@ -31,7 +25,7 @@ function headersFor(c: PromptCols) {
 
 function aiPrompt(c: PromptCols) {
   const headers = headersFor(c).join(" | ");
-  return `You are preparing a spreadsheet for LemmaPath.
+  return `You are preparing a spreadsheet for Sentence Paths.
 
 Return ONLY a table (TSV preferred) with headers:
 ${headers}
@@ -39,7 +33,7 @@ ${headers}
 Rules:
 - One sentence per row.
 - Keep rows in the order you want to practice (easy → hard).
-- You MAY name the Target column like: "Target Language (Greek)" — LemmaPath auto-detects common variants.
+- You MAY name the Target column like: "Target Language (Greek)" — Sentence Paths auto-detects common variants.
 - Gloss should be word-by-word (token-level), not a paragraph.
 - No extra commentary before or after the table.`;
 }
@@ -65,6 +59,8 @@ type Props = {
   onSelectDeck: (deckId: string) => void;
   onCreateDeck: () => void;
   onImported: () => void | Promise<void>;
+  forceShowTips?: boolean;
+  showPickers?: boolean;
   fileInputRef?: React.RefObject<HTMLInputElement>;
   onToast?: (msg: string) => void;
 };
@@ -93,11 +89,16 @@ export function ImportPanel(props: Props) {
   const [sheetNames, setSheetNames] = useState<string[]>([]);
   const [sheet, setSheet] = useState<string>("");
 
-  const [showTips, setShowTips] = usePersistedBool("lemmapath_show_import_tips", true);
+  const [showTips, setShowTips] = usePersistedBool("sentencepaths_show_import_tips", false);
   const [promptCols, setPromptCols] = useState<PromptCols>("two");
   const [format, setFormat] = useState<"tsv" | "csv">("tsv");
 
   const toast = (msg: string) => (props.onToast ? props.onToast(msg) : alert(msg));
+
+  useEffect(() => {
+    if (props.forceShowTips) setShowTips(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [props.forceShowTips]);
 
   const localFileRef = useRef<HTMLInputElement>(null);
   const fileRef = props.fileInputRef ?? localFileRef;
@@ -126,6 +127,7 @@ export function ImportPanel(props: Props) {
 
       if (ext === "csv" || ext === "tsv") {
         const text = await file.text();
+        const { importCSVorTSV } = await import("../data/importers");
         await importCSVorTSV({
           dataset: props.dataset,
           deckId: props.deck.id,
@@ -143,7 +145,8 @@ export function ImportPanel(props: Props) {
 
       if (ext === "xlsx") {
         const ab = await file.arrayBuffer();
-        const names = listSheetNames(ab);
+        const { listSheetNames, importXLSX } = await import("../data/importers");
+        const names = await listSheetNames(ab);
         setSheetNames(names);
         const first = names[0] ?? "";
         setSheet(first);
@@ -165,7 +168,7 @@ export function ImportPanel(props: Props) {
         }
 
         // Otherwise, keep the buffer in memory by re-reading when user clicks import.
-        (fileRef.current as any)._lemmapath_last_xlsx = { name: file.name, ab };
+        (fileRef.current as any)._sentencepaths_last_xlsx = { name: file.name, ab };
         return;
       }
 
@@ -181,7 +184,7 @@ export function ImportPanel(props: Props) {
 
   async function importSelectedSheet() {
     try {
-      const store = (fileRef.current as any)?._lemmapath_last_xlsx as { name: string; ab: ArrayBuffer } | undefined;
+      const store = (fileRef.current as any)?._sentencepaths_last_xlsx as { name: string; ab: ArrayBuffer } | undefined;
       if (!store) {
         toast("Please choose an .xlsx file first.");
         return;
@@ -194,6 +197,7 @@ export function ImportPanel(props: Props) {
       setBusy(true);
       setProgress(0);
 
+      const { importXLSX } = await import("../data/importers");
       await importXLSX({
         dataset: props.dataset,
         deckId: props.deck.id,
@@ -208,7 +212,7 @@ export function ImportPanel(props: Props) {
       await props.onImported();
       setSheetNames([]);
       setSheet("");
-      (fileRef.current as any)._lemmapath_last_xlsx = undefined;
+      (fileRef.current as any)._sentencepaths_last_xlsx = undefined;
     } catch (e: any) {
       toast(e?.message || String(e));
     } finally {
@@ -245,29 +249,31 @@ export function ImportPanel(props: Props) {
         </div>
       </div>
 
-      <div className="row" style={{ gap: 10, flexWrap: "wrap", marginTop: 12 }}>
-        <span className="pill">Language</span>
-        <span className="pill strong">{props.dataset.name}</span>
+      {props.showPickers !== false && (
+        <div className="row" style={{ gap: 10, flexWrap: "wrap", marginTop: 12 }}>
+          <span className="pill">Language</span>
+          <span className="pill strong">{props.dataset.name}</span>
 
-        <span className="pill">Path</span>
-        <select
-          className="btn"
-          value={props.deck.id}
-          onChange={(e) => props.onSelectDeck(e.target.value)}
-          style={{ minWidth: 240 }}
-          disabled={busy}
-        >
-          {props.decks.map((d) => (
-            <option key={d.id} value={d.id}>
-              {d.name}
-            </option>
-          ))}
-        </select>
+          <span className="pill">Path</span>
+          <select
+            className="btn"
+            value={props.deck.id}
+            onChange={(e) => props.onSelectDeck(e.target.value)}
+            style={{ minWidth: 240 }}
+            disabled={busy}
+          >
+            {props.decks.map((d) => (
+              <option key={d.id} value={d.id}>
+                {d.name}
+              </option>
+            ))}
+          </select>
 
-        <button className="btn" onClick={props.onCreateDeck} disabled={busy} title="Create a new path inside this language">
-          New path
-        </button>
-      </div>
+          <button className="btn" onClick={props.onCreateDeck} disabled={busy} title="Create a new path inside this language">
+            New path
+          </button>
+        </div>
+      )}
 
       {showTips && (
         <div className="panel" style={{ padding: 12, marginTop: 12, background: "rgba(255,255,255,0.45)" }}>
@@ -279,38 +285,43 @@ export function ImportPanel(props: Props) {
           </div>
 
           <div style={{ color: "var(--muted)", fontSize: 14, marginTop: 8, lineHeight: 1.55 }}>
-            Minimum: <strong>English</strong> and <strong>Target</strong>.
-            Optional: <strong>Transliteration</strong> and <strong>Gloss</strong> (word-by-word).
+            Pick your column layout, then either download a tiny template or copy an AI prompt.
             <br />
-            Keep rows in the order you want to practice (easy → hard). LemmaPath preserves that order.
+            Minimum: <strong>English</strong> + <strong>Target</strong>. Optional: <strong>Transliteration</strong> and <strong>Gloss</strong> (word-by-word).
           </div>
 
-          <div className="row" style={{ gap: 8, flexWrap: "wrap", marginTop: 10 }}>
-            {(["two", "threeTranslit", "threeGloss", "four"] as PromptCols[]).map((c) => (
-              <button
-                key={c}
-                className={"btn btn-small " + (promptCols === c ? "primary" : "")}
-                onClick={() => setPromptCols(c)}
-                disabled={busy}
-              >
-                {colsLabel(c)}
-              </button>
-            ))}
-          </div>
-
-          <div className="row" style={{ gap: 8, flexWrap: "wrap", marginTop: 10, alignItems: "center" }}>
-            <span className="pill">Format</span>
-            <button
-              className={"btn btn-small " + (format === "tsv" ? "primary" : "")}
-              onClick={() => setFormat("tsv")}
+          <div className="row" style={{ gap: 10, flexWrap: "wrap", marginTop: 10, alignItems: "center" }}>
+            <span className="pill">Columns</span>
+            <select
+              className="btn"
+              value={promptCols}
+              onChange={(e) => setPromptCols(e.target.value as PromptCols)}
               disabled={busy}
-              title="Best for spreadsheet import"
+              style={{ minWidth: 260 }}
+              title="Choose the columns you plan to import"
             >
-              TSV
-            </button>
-            <button className={"btn btn-small " + (format === "csv" ? "primary" : "")} onClick={() => setFormat("csv")} disabled={busy}>
-              CSV
-            </button>
+              <option value="two">{colsLabel("two")}</option>
+              <option value="threeTranslit">{colsLabel("threeTranslit")}</option>
+              <option value="threeGloss">{colsLabel("threeGloss")}</option>
+              <option value="four">{colsLabel("four")}</option>
+            </select>
+          </div>
+
+          <div className="row" style={{ gap: 10, flexWrap: "wrap", marginTop: 10, alignItems: "center" }}>
+            <span className="pill">Format</span>
+            <select
+              className="btn"
+              value={format}
+              onChange={(e) => setFormat(e.target.value as any)}
+              disabled={busy}
+              style={{ minWidth: 220 }}
+              title="TSV is usually best for spreadsheets"
+            >
+              <option value="tsv">TSV (recommended)</option>
+              <option value="csv">CSV</option>
+            </select>
+
+            <span className="pill" title="Keep rows in the order you want to practice (easy → hard).">Order preserved</span>
           </div>
 
           <div className="row" style={{ gap: 8, flexWrap: "wrap", marginTop: 10 }}>
@@ -337,7 +348,7 @@ export function ImportPanel(props: Props) {
                 const blob = new Blob([text], { type: "text/plain" });
                 const url = URL.createObjectURL(blob);
                 const a = document.createElement("a");
-                const fname = `lemmapath-template-${promptCols}.${format}`;
+                const fname = `sentencepaths-template-${promptCols}.${format}`;
                 a.href = url;
                 a.download = fname;
                 a.click();
