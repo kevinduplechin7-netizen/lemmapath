@@ -1,4 +1,5 @@
-[build]
+﻿[build]
+  base = "lemmapath"
   publish = "dist"
   command = "npm run build"
 
