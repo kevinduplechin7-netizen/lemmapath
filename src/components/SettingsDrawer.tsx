@@ -36,7 +36,7 @@ export function SettingsDrawer(props: {
         TTS uses your browser&rsquo;s built-in voices. Voices for <strong>{lang.languageTag || "und"}</strong>: {matching.length}. If you see zero, install a system voice for that language or try another browser/device.
       </div>
 
-      <div className="row" style={{ marginTop: 10 }}>
+      <div className="row" style={{ marginTop: 10, alignItems: "center" }}>
         <span className="pill">Rate</span>
         <input
           type="range"
@@ -45,7 +45,7 @@ export function SettingsDrawer(props: {
           step="0.05"
           value={lang.ttsRate}
           onChange={(e) => props.onUpdate({ ttsRate: Number(e.target.value) })}
-          style={{ width: 220 }}
+          style={{ flex: 1, minWidth: 160 }}
         />
         <span className="pill">Pitch</span>
         <input
@@ -55,7 +55,7 @@ export function SettingsDrawer(props: {
           step="0.05"
           value={lang.ttsPitch}
           onChange={(e) => props.onUpdate({ ttsPitch: Number(e.target.value) })}
-          style={{ width: 220 }}
+          style={{ flex: 1, minWidth: 160 }}
         />
       </div>
       <div className="row" style={{ marginTop: 10 }}>
@@ -64,7 +64,7 @@ export function SettingsDrawer(props: {
           className="btn"
           value={lang.preferredVoiceURI ?? ""}
           onChange={(e) => props.onUpdate({ preferredVoiceURI: e.target.value || undefined })}
-          style={{ minWidth: 320 }}
+          style={{ minWidth: 0, flex: 1 }}
         >
           <option value="">Auto</option>
           {voiceList.map((v) => (
