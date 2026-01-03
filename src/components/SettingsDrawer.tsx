@@ -4,8 +4,14 @@ export function SettingsDrawer(props: {
   dataset: Dataset;
   onUpdate: (patch: Partial<Dataset>) => void;
   voices: SpeechSynthesisVoice[];
+  onTestVoice?: () => void;
 }) {
   const lang = props.dataset;
+
+  const tag = (lang.languageTag || "und").toLowerCase();
+  const tagPrefix = tag === "und" ? "" : tag.split("-")[0];
+  const matching = tagPrefix ? props.voices.filter((v) => (v.lang || "").toLowerCase().startsWith(tagPrefix)) : props.voices;
+  const voiceList = matching.length ? matching : props.voices;
 
   return (
     <div className="panel" style={{ padding: 16, marginTop: 12 }}>
@@ -24,6 +30,10 @@ export function SettingsDrawer(props: {
           <option value="ltr">LTR</option>
           <option value="rtl">RTL</option>
         </select>
+      </div>
+
+      <div style={{ marginTop: 8, color: "var(--muted)", fontSize: 13, lineHeight: 1.45 }}>
+        TTS uses your browser&rsquo;s built-in voices. Voices for <strong>{lang.languageTag || "und"}</strong>: {matching.length}. If you see zero, install a system voice for that language or try another browser/device.
       </div>
 
       <div className="row" style={{ marginTop: 10 }}>
@@ -48,7 +58,6 @@ export function SettingsDrawer(props: {
           style={{ width: 220 }}
         />
       </div>
-
       <div className="row" style={{ marginTop: 10 }}>
         <span className="pill">Voice</span>
         <select
@@ -58,12 +67,14 @@ export function SettingsDrawer(props: {
           style={{ minWidth: 320 }}
         >
           <option value="">Auto</option>
-          {props.voices.map((v) => (
+          {voiceList.map((v) => (
             <option key={v.voiceURI} value={v.voiceURI}>
               {v.name} — {v.lang}
             </option>
           ))}
         </select>
+
+        <button className="btn" type="button" onClick={props.onTestVoice} disabled={!props.onTestVoice} title="Play a short test">Test</button>
 
         <label className="row" style={{ gap: 8 }}>
           <input

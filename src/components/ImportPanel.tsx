@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { Dataset, Deck } from "../data/db";
 import type { ImportMapping, ImportMode } from "../data/importers";
+import { INTERLINEAR_STUDIO_URL } from "../config";
 
 function extOf(name: string) {
   const parts = name.toLowerCase().split(".");
@@ -52,6 +53,27 @@ function templateText(c: PromptCols, delimiter: "\t" | ",") {
   return join(h) + "\n" + join(example);
 }
 
+function templateAOA(c: PromptCols): any[][] {
+  const h = headersFor(c);
+  const example = c === "two"
+    ? ["My parents don't know where I am.", "…"]
+    : c === "threeTranslit"
+      ? ["My parents don't know where I am.", "…", "…"]
+      : c === "threeGloss"
+        ? ["My parents don't know where I am.", "…", "my parents / do not / know / where / I am"]
+        : ["My parents don't know where I am.", "…", "…", "my parents / do not / know / where / I am"];
+  return [h, example];
+}
+
+function downloadBlob(filename: string, blob: Blob) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+
 type Props = {
   dataset: Dataset;
   deck: Deck;
@@ -91,7 +113,7 @@ export function ImportPanel(props: Props) {
 
   const [showTips, setShowTips] = usePersistedBool("sentencepaths_show_import_tips", false);
   const [promptCols, setPromptCols] = useState<PromptCols>("two");
-  const [format, setFormat] = useState<"tsv" | "csv">("tsv");
+  const [format, setFormat] = useState<"tsv" | "csv" | "xlsx">("tsv");
 
   const toast = (msg: string) => (props.onToast ? props.onToast(msg) : alert(msg));
 
@@ -246,7 +268,22 @@ export function ImportPanel(props: Props) {
           >
             Replace
           </button>
+
+          <a
+            className="btn"
+            href={INTERLINEAR_STUDIO_URL}
+            target="_blank"
+            rel="noreferrer"
+            title="Open Interlinear Studio to generate or clean an import sheet"
+            style={{ textDecoration: "none", display: "inline-flex", alignItems: "center", justifyContent: "center" }}
+          >
+            Interlinear Studio
+          </a>
         </div>
+      </div>
+
+      <div style={{ marginTop: 10, color: "var(--muted)", fontSize: 13, lineHeight: 1.5 }}>
+        Want the fastest path? Generate a ready-to-import sheet with <strong>Interlinear Studio</strong>, then upload it here.
       </div>
 
       {props.showPickers !== false && (
@@ -315,16 +352,28 @@ export function ImportPanel(props: Props) {
               onChange={(e) => setFormat(e.target.value as any)}
               disabled={busy}
               style={{ minWidth: 220 }}
-              title="TSV is usually best for spreadsheets"
+              title="TSV is safest (no commas). XLSX is Excel-friendly."
             >
               <option value="tsv">TSV (recommended)</option>
               <option value="csv">CSV</option>
+              <option value="xlsx">XLSX (Excel)</option>
             </select>
 
             <span className="pill" title="Keep rows in the order you want to practice (easy → hard).">Order preserved</span>
           </div>
 
           <div className="row" style={{ gap: 8, flexWrap: "wrap", marginTop: 10 }}>
+            <a
+              className="btn primary"
+              href={INTERLINEAR_STUDIO_URL}
+              target="_blank"
+              rel="noreferrer"
+              style={{ textDecoration: "none", display: "inline-flex", alignItems: "center", justifyContent: "center" }}
+              title="Generate or clean an import sheet"
+            >
+              Open Interlinear Studio
+            </a>
+
             <button
               className="btn"
               onClick={async () => {
@@ -342,18 +391,31 @@ export function ImportPanel(props: Props) {
 
             <button
               className="btn"
-              onClick={() => {
-                const delimiter = format === "tsv" ? "\t" : ",";
-                const text = templateText(promptCols, delimiter);
-                const blob = new Blob([text], { type: "text/plain" });
-                const url = URL.createObjectURL(blob);
-                const a = document.createElement("a");
-                const fname = `sentencepaths-template-${promptCols}.${format}`;
-                a.href = url;
-                a.download = fname;
-                a.click();
-                URL.revokeObjectURL(url);
-                toast("Template downloaded.");
+              onClick={async () => {
+                try {
+                  if (format === "xlsx") {
+                    const XLSX = await import("xlsx");
+                    const aoa = templateAOA(promptCols);
+                    const ws = XLSX.utils.aoa_to_sheet(aoa);
+                    const wb = XLSX.utils.book_new();
+                    XLSX.utils.book_append_sheet(wb, ws, "Template");
+                    const out = XLSX.write(wb, { bookType: "xlsx", type: "array" });
+                    const blob = new Blob([out], {
+                      type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    });
+                    downloadBlob(`sentencepaths-template-${promptCols}.xlsx`, blob);
+                    toast("Template downloaded.");
+                    return;
+                  }
+
+                  const delimiter = format === "tsv" ? "\t" : ",";
+                  const txt = templateText(promptCols, delimiter);
+                  const blob = new Blob([txt], { type: "text/plain" });
+                  downloadBlob(`sentencepaths-template-${promptCols}.${format}`, blob);
+                  toast("Template downloaded.");
+                } catch (e: any) {
+                  toast(e?.message || "Template failed.");
+                }
               }}
               disabled={busy}
             >
@@ -433,9 +495,31 @@ export function ImportPanel(props: Props) {
       )}
 
       {!showTips && (
-        <div style={{ marginTop: 10 }}>
+        <div className="row" style={{ marginTop: 10, gap: 8, flexWrap: "wrap" }}>
+          <button
+            className="btn"
+            onClick={async () => {
+              try {
+                const XLSX = await import("xlsx");
+                const aoa = templateAOA(promptCols);
+                const ws = XLSX.utils.aoa_to_sheet(aoa);
+                const wb = XLSX.utils.book_new();
+                XLSX.utils.book_append_sheet(wb, ws, "Template");
+                const out = XLSX.write(wb, { bookType: "xlsx", type: "array" });
+                downloadBlob(`sentencepaths-template-${promptCols}.xlsx`, new Blob([out], {
+                  type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                }));
+                toast("Template downloaded.");
+              } catch {
+                toast("Template failed.");
+              }
+            }}
+          >
+            Download template (Excel)
+          </button>
+
           <button className="btn" onClick={() => setShowTips(true)}>
-            Show templates & AI
+            Templates & AI
           </button>
         </div>
       )}
