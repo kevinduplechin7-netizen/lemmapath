@@ -30,7 +30,6 @@ export function SentenceCard(props: {
       <div className="sentenceGrid">
         {props.showSource ? (
           <div className="sentenceCol">
-            <div className="sentenceLabel">English</div>
             <div className="sentenceSource" style={{ fontSize: `${16 * props.fontScale}px` }}>
               {row.sourceText || "—"}
             </div>
@@ -38,21 +37,18 @@ export function SentenceCard(props: {
         ) : null}
 
         <div className="sentenceCol">
-          <div className="sentenceLabel">{props.languageName || "Target"}</div>
           <div className="sentenceTarget" style={{ fontSize: `${26 * props.fontScale}px` }}>
             {row.targetText || "—"}
           </div>
 
           {props.showTranslit ? (
             <div className="sentenceMeta">
-              <div className="sentenceMetaLabel">Transliteration</div>
               <div className="sentenceMetaText">{row.transliterationText || "—"}</div>
             </div>
           ) : null}
 
           {props.showGloss ? (
             <div className="sentenceMeta">
-              <div className="sentenceMetaLabel">Gloss</div>
               <div className="sentenceMetaText" style={{ whiteSpace: "pre-wrap" }}>{row.glossText || "—"}</div>
             </div>
           ) : null}

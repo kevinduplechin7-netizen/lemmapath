@@ -126,7 +126,7 @@ function getRowValue(r: Record<string, any>, key?: string) {
   return String(r[k] ?? r[key] ?? "").trim();
 }
 
-async function clearPathData(datasetId: string, deckId: string) {
+export async function clearPathData(datasetId: string, deckId: string) {
   await db.sentences.where("[datasetId+deckId]").equals([datasetId, deckId]).delete();
 
   await db.srs
@@ -141,9 +141,59 @@ async function clearPathData(datasetId: string, deckId: string) {
     await db.pathProgress.put({
       ...pp,
       linearOrder: 0,
+      srsNewOrder: 0,
       updatedAt: Date.now()
     });
   }
+}
+
+async function normalizeOrdersAndClampProgress(datasetId: string, deckId: string) {
+  const rows = await db.sentences.where("[datasetId+deckId]").equals([datasetId, deckId]).toArray();
+  rows.sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || String(a.id).localeCompare(String(b.id)));
+  let changed = false;
+  rows.forEach((r, idx) => {
+    if (r.order !== idx) {
+      (r as any).order = idx;
+      changed = true;
+    }
+  });
+  if (changed && rows.length) {
+    await db.sentences.bulkPut(rows);
+  }
+
+  const last = Math.max(0, rows.length - 1);
+  const pp = await db.pathProgress.get([datasetId, deckId]).catch(() => undefined);
+  if (pp) {
+    const clamped = {
+      ...pp,
+      linearOrder: rows.length ? Math.min(pp.linearOrder ?? 0, last) : 0,
+      srsNewOrder: rows.length ? Math.min(pp.srsNewOrder ?? 0, last) : 0,
+      updatedAt: Date.now()
+    };
+    await db.pathProgress.put(clamped);
+  }
+}
+
+export async function deleteImportBatch(opts: { datasetId: string; deckId: string; importId: string }) {
+  const { datasetId, deckId, importId } = opts;
+
+  return await db.transaction("rw", db.sentences, db.imports, db.srs, db.pathProgress, async () => {
+    const rows = await db.sentences
+      .where("[datasetId+deckId+importId]")
+      .equals([datasetId, deckId, importId])
+      .toArray();
+
+    const ids = rows.map((r) => r.id);
+    if (ids.length) {
+      await db.sentences.bulkDelete(ids);
+      const keys = ids.map((id) => [datasetId, deckId, id] as any);
+      await db.srs.bulkDelete(keys);
+    }
+
+    await db.imports.delete(importId);
+    await normalizeOrdersAndClampProgress(datasetId, deckId);
+    return { deleted: ids.length };
+  });
 }
 
 async function getNextOrderBase(datasetId: string, deckId: string) {

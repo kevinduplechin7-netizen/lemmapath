@@ -10,6 +10,7 @@ import {
   recordTokensSeen,
   type Dataset,
   type Deck,
+  type ImportBatchRow,
   type PathProgressRow,
   type SentenceRow,
   type SRSRow
@@ -24,7 +25,14 @@ import { Modal } from "./components/Modal";
 import { useTTS } from "./hooks/useTTS";
 import { INTERLINEAR_STUDIO_URL } from "./config";
 
+// PWA update control (lets us show a "Refresh" button when a new version is available).
+import { registerSW } from "virtual:pwa-register";
+
+import { clearPathData, deleteImportBatch } from "./data/importers";
+
 type Mode = "linear" | "srs";
+
+type View = "home" | "practice" | "library";
 
 type Toast = { msg: string; ts: number } | null;
 
@@ -94,7 +102,69 @@ export default function App() {
     setTimeout(() => setToast((t) => (t && Date.now() - t.ts > 1800 ? null : t)), 2000);
   };
 
-  const [view, setView] = useState<"home" | "practice" | "library">("home");
+  const [view, setView] = useState<View>("home");
+  const lastNonLibraryViewRef = useRef<View>("home");
+
+  const goToLibrary = () => {
+    if (view !== "library") lastNonLibraryViewRef.current = view;
+    setView("library");
+  };
+  const backFromLibrary = () => {
+    setView(lastNonLibraryViewRef.current || "home");
+  };
+
+  // PWA updates
+  const [pwaNeedRefresh, setPwaNeedRefresh] = useState(false);
+  const updateSWRef = useRef<((reloadPage?: boolean) => Promise<void>) | null>(null);
+
+  useEffect(() => {
+    // registerSW is safe in browser-only Vite apps.
+    try {
+      const updateSW = registerSW({
+        immediate: true,
+        onNeedRefresh() {
+          setPwaNeedRefresh(true);
+        },
+        onOfflineReady() {
+          // Keep it subtle (no toast spam)
+        }
+      });
+      updateSWRef.current = updateSW as any;
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  async function refreshAppFilesKeepData() {
+    // This clears SW + Cache Storage only. It does NOT touch IndexedDB/local data.
+    try {
+      if (updateSWRef.current) {
+        // If a new SW is waiting, this will activate it and reload.
+        await updateSWRef.current(true);
+        return;
+      }
+    } catch {
+      // fall through
+    }
+
+    try {
+      if ("serviceWorker" in navigator) {
+        const regs = await navigator.serviceWorker.getRegistrations();
+        for (const r of regs) await r.unregister();
+      }
+    } catch {
+      // ignore
+    }
+    try {
+      if ("caches" in window) {
+        const keys = await caches.keys();
+        await Promise.all(keys.map((k) => caches.delete(k)));
+      }
+    } catch {
+      // ignore
+    }
+    location.reload();
+  }
 
   const [datasets, setDatasets] = useState<Dataset[]>([]);
   const [decks, setDecks] = useState<Deck[]>([]);
@@ -123,6 +193,11 @@ export default function App() {
 
   const [showHelp, setShowHelp] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [showShortcuts, setShowShortcuts] = useState(false);
+
+  // Library: manage import batches (delete / undo)
+  const [showImportManager, setShowImportManager] = useState(false);
+  const [importBatches, setImportBatches] = useState<ImportBatchRow[]>([]);
 
   const [forceImportTips, setForceImportTips] = useState(false);
   const [showNewLanguage, setShowNewLanguage] = useState(false);
@@ -131,6 +206,8 @@ export default function App() {
   const [showAdvancedLanguages, setShowAdvancedLanguages] = useState(false);
 
   const [autoRun, setAutoRun] = useState<boolean>(() => localStorage.getItem("sentencepaths_autoRun") === "1");
+  // Auto mode can be temporarily paused without disabling it.
+  const [autoPaused, setAutoPaused] = useState<boolean>(false);
   const [autoAfter, setAutoAfter] = useState<"audio" | "delay">(
     (localStorage.getItem("sentencepaths_autoAfter") as any) === "delay" ? "delay" : "audio"
   );
@@ -157,6 +234,13 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem("sentencepaths_autoRun", autoRun ? "1" : "0");
   }, [autoRun]);
+
+  useEffect(() => {
+    if (!autoRun) setAutoPaused(false);
+  }, [autoRun]);
+  useEffect(() => {
+    if (view !== "practice") setAutoPaused(false);
+  }, [view]);
   useEffect(() => {
     localStorage.setItem("sentencepaths_autoAfter", autoAfter);
   }, [autoAfter]);
@@ -209,7 +293,8 @@ export default function App() {
     setDeckId(dk.id);
 
     // Make the next step obvious.
-    setView("library");
+    lastNonLibraryViewRef.current = "home";
+    goToLibrary();
     setForceImportTips(true);
     showToast("Language added");
   }
@@ -259,6 +344,14 @@ export default function App() {
     const now = Date.now();
     const due = await db.srs.where("[datasetId+deckId+dueAt]").between([datasetId, deckId, 0], [datasetId, deckId, now], true, true).count();
     setDueCount(due);
+
+    // Import batches (used for "Delete import" in the Library)
+    const imps = await db.imports
+      .where("[datasetId+deckId+createdAt]")
+      .between([datasetId, deckId, 0], [datasetId, deckId, Number.MAX_SAFE_INTEGER])
+      .toArray();
+    imps.sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0));
+    setImportBatches(imps);
   }
 
   async function pickCurrent() {
@@ -545,11 +638,8 @@ export default function App() {
   }
 
   // ---- Keyboard shortcuts (Practice) ----
-  // Space: Play
-  // ArrowLeft / ArrowRight: Prev / Next (linear mode)
   useEffect(() => {
     if (view !== "practice") return;
-    if (showHelp || showSettings || showNewLanguage) return;
 
     const isTyping = (t: EventTarget | null) => {
       const el = t as HTMLElement | null;
@@ -558,40 +648,181 @@ export default function App() {
       return tag === "input" || tag === "textarea" || tag === "select" || (el as any).isContentEditable;
     };
 
+    const closeAnyModal = () => {
+      setShowShortcuts(false);
+      setShowHelp(false);
+      setShowSettings(false);
+      setShowNewLanguage(false);
+    };
+
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.repeat) return;
       if (isTyping(e.target)) return;
 
-      // Space => Play
-      if (e.code === "Space" || e.key === " ") {
+      const key = e.key;
+      const k = key.toLowerCase();
+
+      const modalOpen = showShortcuts || showHelp || showSettings || showNewLanguage;
+      if (modalOpen) {
+        if (key === "Escape") {
+          e.preventDefault();
+          closeAnyModal();
+        }
+        return;
+      }
+
+      // Global-ish (within practice)
+      if (key === "?") {
+        e.preventDefault();
+        setShowShortcuts((v) => !v);
+        return;
+      }
+      if (k === "h") {
+        e.preventDefault();
+        setShowHelp(true);
+        return;
+      }
+      if (k === "s") {
+        e.preventDefault();
+        setShowSettings(true);
+        return;
+      }
+      if (k === "l") {
+        e.preventDefault();
+        goToLibrary();
+        return;
+      }
+      if (key === "Escape") {
+        e.preventDefault();
+        setView("home");
+        return;
+      }
+
+      if (!pathProg) return;
+
+      // Mode toggle
+      if (k === "m") {
+        e.preventDefault();
+        void toggleMode(pathProg.mode === "srs" ? "linear" : "srs");
+        return;
+      }
+
+      // Always-available play key
+      if (k === "p") {
         e.preventDefault();
         void playCurrent();
         return;
       }
 
-      if (!pathProg) return;
-      if (pathProg.mode !== "linear") return;
+      // Linear mode shortcuts
+      if (pathProg.mode === "linear") {
+        // Space: play (manual) OR pause/resume (auto)
+        if (e.code === "Space" || key === " ") {
+          e.preventDefault();
+          if (autoRun) {
+            setAutoPaused((v) => !v);
+          } else {
+            void playCurrent();
+          }
+          return;
+        }
 
-      // Arrow keys => navigate (count reps in both directions)
-      if (e.key === "ArrowRight") {
-        e.preventDefault();
-        void bumpLinear(1, true);
+        if (k === "a") {
+          e.preventDefault();
+          setAutoRun((v) => {
+            const nv = !v;
+            if (nv) setAutoPaused(false);
+            return nv;
+          });
+          return;
+        }
+
+        if (k === "e") {
+          e.preventDefault();
+          setShowSource((v) => !v);
+          return;
+        }
+        if (k === "t") {
+          e.preventDefault();
+          setShowTranslit((v) => !v);
+          return;
+        }
+        if (k === "g") {
+          e.preventDefault();
+          setShowGloss((v) => !v);
+          return;
+        }
+
+        if (k === "c") {
+          e.preventDefault();
+          if (row?.targetText) navigator.clipboard.writeText(row.targetText).then(() => showToast("Copied"));
+          return;
+        }
+
+        // Arrow keys => navigate (count reps in both directions)
+        if (key === "ArrowRight") {
+          e.preventDefault();
+          if (autoRun) setAutoPaused(true);
+          void bumpLinear(1, true);
+          return;
+        }
+        if (key === "ArrowLeft") {
+          e.preventDefault();
+          if (autoRun) setAutoPaused(true);
+          void bumpLinear(-1, true);
+          return;
+        }
+
         return;
       }
-      if (e.key === "ArrowLeft") {
-        e.preventDefault();
-        void bumpLinear(-1, true);
+
+      // SRS shortcuts
+      if (pathProg.mode === "srs") {
+        if (key === "1") {
+          e.preventDefault();
+          void rateSRS("again");
+          return;
+        }
+        if (key === "2") {
+          e.preventDefault();
+          void rateSRS("hard");
+          return;
+        }
+        if (key === "3") {
+          e.preventDefault();
+          void rateSRS("good");
+          return;
+        }
+        if (key === "4") {
+          e.preventDefault();
+          void rateSRS("easy");
+          return;
+        }
       }
     };
 
     window.addEventListener("keydown", onKeyDown, { passive: false });
     return () => window.removeEventListener("keydown", onKeyDown as any);
-  }, [view, showHelp, showSettings, showNewLanguage, pathProg, playCurrent, bumpLinear]);
+  }, [
+    view,
+    showShortcuts,
+    showHelp,
+    showSettings,
+    showNewLanguage,
+    pathProg,
+    autoRun,
+    row?.targetText,
+    playCurrent,
+    bumpLinear,
+    toggleMode,
+    rateSRS
+  ]);
 
   // ---- Auto-run (linear only) ----
   const autoRunToken = useRef(0);
   useEffect(() => {
     if (!autoRun) return;
+    if (autoPaused) return;
     if (view !== "practice") return;
     if (!pathProg || pathProg.mode !== "linear") return;
     if (!row) return;
@@ -619,7 +850,7 @@ export default function App() {
       autoRunToken.current++;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [autoRun, view, pathProg?.mode, row?.id, autoAfter, autoDelaySec]);
+  }, [autoRun, autoPaused, view, pathProg?.mode, row?.id, autoAfter, autoDelaySec]);
 
   const reps = pathProg?.lifetimeReps ?? 0;
   const wordsRead = pathProg?.lifetimeTokens ?? 0;
@@ -643,8 +874,8 @@ export default function App() {
         </div>
 
         <div className="topbarCenter">
-          <button className="pill strong" onClick={() => setView("library")} title="Change language / import">
-            {languageName || "Language"}
+          <button className="pill strong" onClick={goToLibrary} title="Library & import">
+            {languageName ? `${languageName} · Library` : "Library & Import"}
           </button>
           <span className="pill">{headerModeLabel}</span>
         </div>
@@ -660,6 +891,20 @@ export default function App() {
           </button>
         </div>
       </header>
+
+      {pwaNeedRefresh ? (
+        <div className="updateBanner" role="status">
+          <div style={{ flex: 1 }}>
+            <strong>Update available.</strong> Refresh to load the latest version (your local data stays intact).
+          </div>
+          <button className="btn btn-small" onClick={() => void refreshAppFilesKeepData()}>
+            Refresh
+          </button>
+          <button className="btn btn-small" onClick={() => setPwaNeedRefresh(false)} aria-label="Dismiss">
+            Later
+          </button>
+        </div>
+      ) : null}
 
       {view === "home" ? (
         <div style={{ marginTop: 20 }}>
@@ -690,7 +935,7 @@ export default function App() {
                   className="btn primary heroBtn"
                   onClick={() => {
                     setForceImportTips(true);
-                    setView("library");
+                    goToLibrary();
                   }}
                 >
                   Add sentences
@@ -709,10 +954,10 @@ export default function App() {
                 className="btn"
                 onClick={() => {
                   setForceImportTips(false);
-                  setView("library");
+                  goToLibrary();
                 }}
               >
-                Library
+                Library & Import
               </button>
             </div>
 
@@ -762,6 +1007,7 @@ export default function App() {
                 <button className="btn" onClick={() => setView("home")}>Home</button>
                 <button className="btn" onClick={playCurrent}>Play</button>
                 <button className="btn" onClick={() => rateSRS("again")}>Again</button>
+                <button className="btn" onClick={() => rateSRS("hard")}>Hard</button>
                 <button className="btn primary" onClick={() => rateSRS("good")}>Good</button>
                 <button className="btn" onClick={() => rateSRS("easy")}>Easy</button>
               </>
@@ -777,8 +1023,18 @@ export default function App() {
                 <button className="btn" onClick={() => bumpLinear(1, true)}>
                   Next
                 </button>
-                <button className={"btn " + (autoRun ? "primary" : "")} onClick={() => setAutoRun((v) => !v)}>
-                  Auto
+                <button
+                  className={"btn " + (autoRun ? "primary" : "")}
+                  title={autoRun ? (autoPaused ? "Auto mode is paused. Press Space to resume." : "Auto mode is on. Press Space to pause.") : "Turn on auto mode"}
+                  onClick={() => {
+                    setAutoRun((v) => {
+                      const nv = !v;
+                      if (nv) setAutoPaused(false);
+                      return nv;
+                    });
+                  }}
+                >
+                  {autoRun ? (autoPaused ? "Auto (paused)" : "Auto") : "Auto"}
                 </button>
               </>
             )}
@@ -807,6 +1063,10 @@ export default function App() {
             >
               Copy target
             </button>
+
+            <button className="chip" onClick={() => setShowShortcuts(true)} title="Keyboard shortcuts ( ? )">
+              Shortcuts
+            </button>
           </div>
         </div>
       ) : null}
@@ -816,7 +1076,7 @@ export default function App() {
           <div className="panel" style={{ padding: 18 }}>
             <div className="row" style={{ justifyContent: "space-between", alignItems: "center", gap: 10 }}>
               <div>
-                <div style={{ fontWeight: 900, fontSize: 18 }}>Library</div>
+                <div style={{ fontWeight: 900, fontSize: 18 }}>Library & Import</div>
                 <div style={{ color: "var(--muted)", fontSize: 13, marginTop: 4 }}>
                   Import sentences, add languages, and manage backups.
                 </div>
@@ -825,14 +1085,8 @@ export default function App() {
                 <button className="btn" onClick={() => setShowNewLanguage(true)}>
                   New language
                 </button>
-                <button
-                  className="btn"
-                  onClick={() => {
-                    setForceImportTips(false);
-                    setView("home");
-                  }}
-                >
-                  Done
+                <button className="btn" onClick={() => { setForceImportTips(false); backFromLibrary(); }}>
+                  Back
                 </button>
               </div>
             </div>
@@ -905,8 +1159,88 @@ export default function App() {
               </div>
             ) : null}
 
+            {datasetId && deckId ? (
+              <div className="panel" style={{ padding: 14, marginTop: 12 }}>
+                <div className="sectionLabel">Step three — Manage imports (optional)</div>
+                <div className="sectionHint">
+                  Delete a past import from this path, or undo the most recent one. (Your data is local-first.)
+                </div>
+
+                <div className="row" style={{ marginTop: 10, gap: 10, flexWrap: "wrap" }}>
+                  <button
+                    className="btn"
+                    disabled={importBatches.length === 0}
+                    onClick={async () => {
+                      const latest = importBatches[0];
+                      if (!latest) return;
+                      const ok = confirm(`Undo last import: ${latest.fileName || "Import"}?`);
+                      if (!ok) return;
+                      await deleteImportBatch(datasetId, deckId, latest.id);
+                      await refreshCounts();
+                      await pickCurrent();
+                      showToast("Last import removed");
+                    }}
+                  >
+                    Undo last import
+                  </button>
+
+                  <button className="btn" onClick={() => setShowImportManager((v) => !v)}>
+                    {showImportManager ? "Hide import list" : "Show import list"}
+                  </button>
+
+                  <button
+                    className="btn"
+                    onClick={async () => {
+                      const ok = confirm("Clear this entire path? (Keeps other paths and languages.)");
+                      if (!ok) return;
+                      await clearPathData(datasetId, deckId);
+                      await refreshCounts();
+                      await pickCurrent();
+                      showToast("Path cleared");
+                    }}
+                  >
+                    Clear this path
+                  </button>
+                </div>
+
+                {showImportManager ? (
+                  <div style={{ marginTop: 10 }}>
+                    {importBatches.length === 0 ? (
+                      <div style={{ color: "var(--muted)", fontSize: 13 }}>No imports yet for this path.</div>
+                    ) : (
+                      <div className="list">
+                        {importBatches.slice(0, 20).map((imp) => (
+                          <div key={imp.id} className="listRow" style={{ alignItems: "center" }}>
+                            <div style={{ flex: 1, minWidth: 220 }}>
+                              <div style={{ fontWeight: 800 }}>{imp.fileName || "Import"}</div>
+                              <div style={{ color: "var(--muted)", fontSize: 12, marginTop: 2 }}>
+                                {imp.rowCount} rows • {new Date(imp.createdAt).toLocaleString()}
+                              </div>
+                            </div>
+                            <button
+                              className="btn btn-small"
+                              onClick={async () => {
+                                const ok = confirm(`Delete this import: ${imp.fileName || "Import"}?`);
+                                if (!ok) return;
+                                await deleteImportBatch(datasetId, deckId, imp.id);
+                                await refreshCounts();
+                                await pickCurrent();
+                                showToast("Import deleted");
+                              }}
+                            >
+                              Delete
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+
             <div className="panel" style={{ padding: 14, marginTop: 12 }}>
-              <div className="sectionLabel">Step three — Backup (recommended)</div>
+              <div className="sectionLabel">Step four — Backup (recommended)</div>
               <div className="sectionHint">Sentence Paths is local-first. Back up your library before switching devices or clearing browser data.</div>
 
               <div className="row" style={{ marginTop: 10, gap: 10, flexWrap: "wrap" }}>
@@ -1107,6 +1441,53 @@ export default function App() {
         </div>
       </Modal>
 
+      <Modal open={showShortcuts} title="Keyboard shortcuts" onClose={() => setShowShortcuts(false)}>
+        <div className="helpStack">
+          <div style={{ color: "var(--muted)", lineHeight: 1.5 }}>
+            Tips: shortcuts work when you are not typing in a field. Press <strong>Esc</strong> to return Home, or close this window.
+          </div>
+
+          <div className="panel" style={{ padding: 14 }}>
+            <div style={{ fontWeight: 900, marginBottom: 8 }}>Global</div>
+            <div className="shortcutGrid">
+              <div className="k">?</div><div>Toggle shortcuts</div>
+              <div className="k">H</div><div>Open help</div>
+              <div className="k">S</div><div>Open settings</div>
+              <div className="k">L</div><div>Open library & import</div>
+              <div className="k">Esc</div><div>Home</div>
+            </div>
+          </div>
+
+          <div className="panel" style={{ padding: 14 }}>
+            <div style={{ fontWeight: 900, marginBottom: 8 }}>Practice (Read mode)</div>
+            <div className="shortcutGrid">
+              <div className="k">Space</div><div>{"Play audio (or pause/resume auto)"}</div>
+              <div className="k">P</div><div>Play audio</div>
+              <div className="k">←</div><div>Previous sentence</div>
+              <div className="k">→</div><div>Next sentence</div>
+              <div className="k">A</div><div>Toggle auto mode</div>
+              <div className="k">E</div><div>Show/hide English</div>
+              <div className="k">T</div><div>Show/hide transliteration</div>
+              <div className="k">G</div><div>Show/hide gloss</div>
+              <div className="k">C</div><div>Copy target text</div>
+              <div className="k">M</div><div>Toggle Read / Review</div>
+            </div>
+          </div>
+
+          <div className="panel" style={{ padding: 14 }}>
+            <div style={{ fontWeight: 900, marginBottom: 8 }}>Practice (Review mode)</div>
+            <div className="shortcutGrid">
+              <div className="k">P</div><div>Play audio</div>
+              <div className="k">1</div><div>Again</div>
+              <div className="k">2</div><div>Hard</div>
+              <div className="k">3</div><div>Good</div>
+              <div className="k">4</div><div>Easy</div>
+              <div className="k">M</div><div>Toggle Read / Review</div>
+            </div>
+          </div>
+        </div>
+      </Modal>
+
       <Modal open={showSettings} title="Settings" onClose={() => setShowSettings(false)}>
         {dataset ? (
           <SettingsDrawer
@@ -1185,10 +1566,18 @@ export default function App() {
         <div className="panel" style={{ padding: 14, marginTop: 12 }}>
           <div style={{ fontWeight: 900, marginBottom: 6 }}>Troubleshooting</div>
           <div style={{ color: "var(--muted)", lineHeight: 1.5 }}>
-            If you ever see a browser IndexedDB error (for example, <strong>"transaction has finished"</strong>), a reset usually fixes it.
-            Back up first if you care about your data.
+            If the app looks stuck on an older version, use <strong>Refresh app files</strong> (keeps your local library).
+            If you ever see a browser IndexedDB error (for example, <strong>"transaction has finished"</strong>), a <strong>Reset</strong> usually fixes it.
           </div>
-          <div style={{ marginTop: 10 }}>
+          <div className="row" style={{ marginTop: 10, gap: 10, flexWrap: "wrap" }}>
+            <button
+              className="btn"
+              onClick={() => void refreshAppFilesKeepData()}
+              title="Clears PWA caches and reloads (keeps your language data)"
+            >
+              Refresh app files (keep data)
+            </button>
+
             <button
               className="btn"
               onClick={async () => {

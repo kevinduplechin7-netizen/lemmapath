@@ -113,7 +113,8 @@ export function ImportPanel(props: Props) {
 
   const [showTips, setShowTips] = usePersistedBool("sentencepaths_show_import_tips", false);
   const [promptCols, setPromptCols] = useState<PromptCols>("two");
-  const [format, setFormat] = useState<"tsv" | "csv" | "xlsx">("tsv");
+  // Default to Excel so "Download template" works instantly for most users.
+  const [format, setFormat] = useState<"tsv" | "csv" | "xlsx">("xlsx");
 
   const toast = (msg: string) => (props.onToast ? props.onToast(msg) : alert(msg));
 
@@ -515,7 +516,7 @@ export function ImportPanel(props: Props) {
               }
             }}
           >
-            Download template (Excel)
+            Download template
           </button>
 
           <button className="btn" onClick={() => setShowTips(true)}>

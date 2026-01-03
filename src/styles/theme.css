@@ -432,6 +432,65 @@ body {
   gap: 12px;
 }
 
+.updateBanner {
+  width: min(980px, 100%);
+  margin: 10px auto 0;
+  padding: 10px 12px;
+  border-radius: 18px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.55);
+  box-shadow: var(--shadow);
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+[data-theme="dark"] .updateBanner {
+  background: rgba(0, 0, 0, 0.35);
+}
+
+.shortcutGrid {
+  display: grid;
+  grid-template-columns: 70px 1fr;
+  gap: 10px 12px;
+  align-items: center;
+}
+
+.shortcutGrid .k {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-weight: 900;
+  font-size: 12px;
+  letter-spacing: 0.02em;
+  padding: 6px 8px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.35);
+  text-align: center;
+}
+
+[data-theme="dark"] .shortcutGrid .k {
+  background: rgba(0, 0, 0, 0.22);
+}
+
+.list {
+  display: grid;
+  gap: 10px;
+}
+
+.listRow {
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.42);
+}
+
+[data-theme="dark"] .listRow {
+  background: rgba(0, 0, 0, 0.22);
+}
+
 @media (max-width: 720px) {
   .topbar {
     flex-wrap: wrap;

@@ -22,7 +22,8 @@ export default defineConfig({
     react(),
     VitePWA({
       registerType: "autoUpdate",
-      injectRegister: "inline",
+      // We register the service worker manually in App.tsx so we can show an "Update available" banner.
+      injectRegister: null,
       includeAssets: [],
       manifest: {
         name: "Sentence Paths",
