@@ -1,8 +1,13 @@
+/*
+  Sentence Paths — "Gemini Canvas modern" theme
+  Presentation-only styling. No business logic is touched.
+*/
+
 :root {
   --bg0: #f7f7fb;
   --bg1: #eef3ff;
   --bg2: #fff1f2;
-  --panel: rgba(255, 255, 255, 0.72);
+  --panel: rgba(255, 255, 255, 0.76);
   --panelSolid: #ffffff;
   --text: #0f172a;
   --muted: rgba(15, 23, 42, 0.62);
@@ -15,22 +20,28 @@
   --bad: #dc2626;
   --radius: 18px;
   --radiusSm: 14px;
-  --ring: rgba(37, 99, 235, 0.28);
+  --ring: rgba(37, 99, 235, 0.26);
+
+  /* Mobile ergonomics */
+  --tap: 44px;
 }
 
+/* Dark mode = deep slate background + near-white glass surfaces */
 [data-theme="dark"] {
   --bg0: #070a12;
-  --bg1: #0b1024;
-  --bg2: #1a0f1f;
-  --panel: rgba(14, 18, 34, 0.72);
-  --panelSolid: #0e1222;
-  --text: #e6eaf6;
-  --muted: rgba(230, 234, 246, 0.62);
-  --border: rgba(230, 234, 246, 0.12);
-  --shadow: 0 18px 48px rgba(0, 0, 0, 0.55);
-  --accent: #60a5fa;
-  --accent2: #c4b5fd;
-  --ring: rgba(96, 165, 250, 0.28);
+  --bg1: #0b1226;
+  --bg2: #120b1f;
+
+  --panel: rgba(255, 255, 255, 0.88);
+  --panelSolid: rgba(255, 255, 255, 0.96);
+  --text: #0b1220;
+  --muted: rgba(11, 18, 32, 0.62);
+  --border: rgba(11, 18, 32, 0.12);
+  --shadow: 0 20px 60px rgba(0, 0, 0, 0.55);
+
+  --accent: #3b82f6;
+  --accent2: #6366f1;
+  --ring: rgba(59, 130, 246, 0.26);
 }
 
 html,
@@ -49,10 +60,12 @@ body {
     radial-gradient(900px 700px at 100% 0%, var(--bg2), transparent 55%),
     radial-gradient(1000px 900px at 50% 100%, rgba(37, 99, 235, 0.10), transparent 60%),
     linear-gradient(180deg, var(--bg0), var(--bg0));
+  overflow-x: hidden;
 }
 
 * {
   box-sizing: border-box;
+  -webkit-tap-highlight-color: transparent;
 }
 
 .container {
@@ -82,7 +95,7 @@ body {
   display: flex;
   gap: 10px;
   align-items: center;
-  min-width: 220px;
+  min-width: 0;
 }
 
 /* Clickable brand (Home) */
@@ -93,6 +106,9 @@ body {
   border-radius: 14px;
   cursor: pointer;
   text-align: left;
+  min-height: var(--tap);
+  display: inline-flex;
+  align-items: center;
 }
 
 .brandBtn:hover {
@@ -131,12 +147,15 @@ body {
   justify-content: center;
   flex: 1;
   min-width: 0;
+  flex-wrap: wrap;
 }
 
 .topbarRight {
   display: flex;
   gap: 10px;
   align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .panel {
@@ -150,16 +169,21 @@ body {
 .row {
   display: flex;
   gap: 10px;
+  flex-wrap: wrap;
 }
 
 .pill {
-  padding: 8px 12px;
+  padding: 10px 12px;
   border-radius: 999px;
   border: 1px solid var(--border);
   background: rgba(255, 255, 255, 0.35);
   color: var(--text);
   font-weight: 700;
   font-size: 13px;
+  min-height: var(--tap);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   max-width: 240px;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -167,7 +191,7 @@ body {
 }
 
 [data-theme="dark"] .pill {
-  background: rgba(0, 0, 0, 0.22);
+  background: rgba(11, 18, 32, 0.06);
 }
 
 .pill.strong {
@@ -190,31 +214,39 @@ body {
 }
 
 .statChip {
-  padding: 8px 12px;
+  padding: 10px 12px;
   border-radius: 999px;
   border: 1px solid var(--border);
   background: rgba(255, 255, 255, 0.35);
   font-size: 13px;
   color: var(--text);
+  min-height: var(--tap);
+  display: inline-flex;
+  align-items: center;
+  white-space: nowrap;
 }
 
 [data-theme="dark"] .statChip {
-  background: rgba(0, 0, 0, 0.22);
+  background: rgba(11, 18, 32, 0.06);
 }
 
 .iconBtn {
-  width: 38px;
-  height: 38px;
+  width: var(--tap);
+  height: var(--tap);
   border-radius: 12px;
   border: 1px solid var(--border);
   background: rgba(255, 255, 255, 0.35);
   color: var(--text);
   font-weight: 900;
   cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
 }
 
 [data-theme="dark"] .iconBtn {
-  background: rgba(0, 0, 0, 0.22);
+  background: rgba(11, 18, 32, 0.06);
 }
 
 .iconBtn:hover {
@@ -229,7 +261,23 @@ body {
   color: var(--text);
   font-weight: 800;
   cursor: pointer;
+  min-height: var(--tap);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  line-height: 1.1;
+  text-wrap: balance;
 }
+
+/* Inputs styled as buttons (used throughout the app) */
+input.btn,
+select.btn {
+  display: inline-block;
+  width: auto;
+}
+
+/* Keep native select indicators for clarity on mobile */
 
 .btn.btn-small {
   padding: 8px 10px;
@@ -246,7 +294,7 @@ body {
 }
 
 [data-theme="dark"] .btn {
-  background: rgba(0, 0, 0, 0.26);
+  background: rgba(11, 18, 32, 0.06);
 }
 
 .btn:hover {
@@ -290,7 +338,7 @@ body {
 }
 
 [data-theme="dark"] .segmented {
-  background: rgba(0, 0, 0, 0.22);
+  background: rgba(11, 18, 32, 0.06);
 }
 
 .segBtn {
@@ -311,7 +359,7 @@ body {
 }
 
 [data-theme="dark"] .segBtn.active {
-  background: rgba(0, 0, 0, 0.30);
+  background: rgba(11, 18, 32, 0.06);
 }
 
 .heroBtn {
@@ -382,13 +430,89 @@ body {
     position: fixed;
     left: 12px;
     right: 12px;
-    bottom: 12px;
+    bottom: calc(12px + env(safe-area-inset-bottom));
     z-index: 12;
+    padding-bottom: calc(10px + env(safe-area-inset-bottom));
   }
 
   /* Leave space so content and chips are not hidden behind the dock */
   .container {
-    padding-bottom: 190px;
+    padding-bottom: calc(240px + env(safe-area-inset-bottom));
+  }
+}
+
+/* SentenceCard (reading mode) — previously missing styles caused overflow on mobile */
+.sentenceCard {
+  overflow: hidden;
+}
+
+/* default: stacked for mobile comfort */
+.sentenceGrid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 12px;
+}
+
+.sentenceCol {
+  min-width: 0;
+}
+
+.sentenceSource {
+  font-size: var(--sp-source, 16px);
+  font-weight: 750;
+  color: var(--muted);
+  line-height: 1.45;
+  letter-spacing: 0.1px;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.sentenceTarget {
+  font-size: var(--sp-target, 26px);
+  margin-top: 2px;
+  font-weight: 950;
+  line-height: 1.24;
+  letter-spacing: 0.1px;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.sentenceMeta {
+  margin-top: 12px;
+  padding: 12px 12px;
+  border-radius: var(--radiusSm);
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.42);
+}
+
+[data-theme="dark"] .sentenceMeta {
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.sentenceMetaText {
+  color: rgba(11, 18, 32, 0.86);
+  font-weight: 700;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+/* If not in dark theme, keep meta text aligned with base palette */
+[data-theme="paper"] .sentenceMetaText,
+:root .sentenceMetaText {
+  color: var(--text);
+}
+
+@media (max-width: 640px) {
+  .sentenceCard {
+    padding: 16px !important;
+  }
+  /* Make Target comfortably large on mobile without breaking fontScale */
+  .sentenceTarget {
+    font-size: max(var(--sp-target, 26px), 30px);
+  }
+  .sentenceSource {
+    font-size: max(var(--sp-source, 16px), 18px);
   }
 }
 
@@ -404,17 +528,19 @@ body {
 }
 
 [data-theme="dark"] .chip {
-  background: rgba(0, 0, 0, 0.22);
+  background: rgba(11, 18, 32, 0.06);
 }
 
 .chip.active {
   background: linear-gradient(135deg, rgba(37, 99, 235, 0.16), rgba(124, 58, 237, 0.14));
 }
 
-.sentenceGrid {
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: 12px;
+@media (min-width: 860px) {
+  /* desktop: English + Target side-by-side when English is enabled */
+  .sentenceGrid {
+    grid-template-columns: 0.9fr 1.1fr;
+    gap: 14px;
+  }
 }
 
 .sentBox {
@@ -425,7 +551,7 @@ body {
 }
 
 [data-theme="dark"] .sentBox {
-  background: rgba(0, 0, 0, 0.26);
+  background: rgba(11, 18, 32, 0.06);
 }
 
 .sentLabel {
@@ -454,7 +580,7 @@ body {
 .toast {
   position: fixed;
   left: 50%;
-  bottom: 18px;
+  bottom: calc(18px + env(safe-area-inset-bottom));
   transform: translateX(-50%);
   padding: 12px 14px;
   border-radius: 14px;
@@ -467,7 +593,7 @@ body {
 }
 
 [data-theme="dark"] .toast {
-  background: rgba(14, 18, 34, 0.92);
+  background: rgba(255, 255, 255, 0.96);
 }
 
 .modalOverlay {
@@ -506,8 +632,8 @@ body {
 }
 
 .modalClose {
-  width: 40px;
-  height: 40px;
+  width: var(--tap);
+  height: var(--tap);
   border-radius: 14px;
   border: 1px solid var(--border);
   background: rgba(255, 255, 255, 0.35);
@@ -516,7 +642,7 @@ body {
 }
 
 [data-theme="dark"] .modalClose {
-  background: rgba(0, 0, 0, 0.22);
+  background: rgba(11, 18, 32, 0.06);
   color: var(--text);
 }
 
@@ -543,7 +669,7 @@ body {
 }
 
 [data-theme="dark"] .updateBanner {
-  background: rgba(0, 0, 0, 0.35);
+  background: rgba(255, 255, 255, 0.82);
 }
 
 .shortcutGrid {
@@ -566,7 +692,7 @@ body {
 }
 
 [data-theme="dark"] .shortcutGrid .k {
-  background: rgba(0, 0, 0, 0.22);
+  background: rgba(11, 18, 32, 0.06);
 }
 
 .list {
@@ -578,6 +704,7 @@ body {
   display: flex;
   gap: 10px;
   justify-content: space-between;
+  flex-wrap: wrap;
   padding: 10px;
   border: 1px solid var(--border);
   border-radius: 16px;
@@ -585,7 +712,7 @@ body {
 }
 
 [data-theme="dark"] .listRow {
-  background: rgba(0, 0, 0, 0.22);
+  background: rgba(11, 18, 32, 0.06);
 }
 
 @media (max-width: 720px) {
@@ -595,11 +722,27 @@ body {
   }
   .brandRow {
     min-width: 0;
+    width: 100%;
   }
   .topbarCenter {
     justify-content: flex-start;
+    flex-wrap: wrap;
+    width: 100%;
+  }
+  .topbarRight {
+    justify-content: flex-start;
+    width: 100%;
   }
   .sentText {
     font-size: 20px;
+  }
+}
+
+@media (max-width: 420px) {
+  .topbar {
+    padding: 10px;
+  }
+  .pill {
+    max-width: 100%;
   }
 }

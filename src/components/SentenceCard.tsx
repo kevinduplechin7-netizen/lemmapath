@@ -1,3 +1,4 @@
+import type { CSSProperties } from "react";
 import type { SentenceRow } from "../data/db";
 
 export function SentenceCard(props: {
@@ -26,18 +27,29 @@ export function SentenceCard(props: {
   }
 
   return (
-    <div className="panel sentenceCard" style={{ padding: 18, marginTop: 18 }} dir={dir}>
+    <div
+      className="panel sentenceCard"
+      style={{
+        padding: 18,
+        marginTop: 18,
+        // Presentation-only CSS variables so mobile can boost readability without breaking the user's fontScale.
+        // (Keeps all state and behavior identical.)
+        "--sp-source": `${16 * props.fontScale}px`,
+        "--sp-target": `${26 * props.fontScale}px`
+      } as CSSProperties}
+      dir={dir}
+    >
       <div className="sentenceGrid">
         {props.showSource ? (
           <div className="sentenceCol">
-            <div className="sentenceSource" style={{ fontSize: `${16 * props.fontScale}px` }}>
+            <div className="sentenceSource">
               {row.sourceText || "—"}
             </div>
           </div>
         ) : null}
 
         <div className="sentenceCol">
-          <div className="sentenceTarget" style={{ fontSize: `${26 * props.fontScale}px` }}>
+          <div className="sentenceTarget">
             {row.targetText || "—"}
           </div>
 
