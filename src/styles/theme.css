@@ -85,6 +85,25 @@ body {
   min-width: 220px;
 }
 
+/* Clickable brand (Home) */
+.brandBtn {
+  border: none;
+  background: transparent;
+  padding: 6px 8px;
+  border-radius: 14px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.brandBtn:hover {
+  box-shadow: 0 0 0 4px var(--ring);
+}
+
+.brandBtn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 4px var(--ring);
+}
+
 .logoDot {
   width: 14px;
   height: 14px;
@@ -218,6 +237,14 @@ body {
   font-size: 13px;
 }
 
+/* Big, thumb-friendly buttons (practice dock) */
+.btn.big {
+  padding: 14px 14px;
+  border-radius: 16px;
+  font-size: 16px;
+  min-height: 52px;
+}
+
 [data-theme="dark"] .btn {
   background: rgba(0, 0, 0, 0.26);
 }
@@ -225,6 +252,18 @@ body {
 .btn:hover {
   box-shadow: 0 0 0 4px var(--ring);
 }
+
+/* Navigation buttons (Back/Home) — noticeable but not as loud as primary */
+.btn.nav {
+  background: linear-gradient(135deg, rgba(37, 99, 235, 0.16), rgba(124, 58, 237, 0.10));
+  border-color: rgba(37, 99, 235, 0.22);
+}
+
+[data-theme="dark"] .btn.nav {
+  background: linear-gradient(135deg, rgba(96, 165, 250, 0.18), rgba(196, 181, 253, 0.10));
+  border-color: rgba(96, 165, 250, 0.22);
+}
+
 
 .btn.primary {
   background: linear-gradient(135deg, var(--accent), var(--accent2));
@@ -293,6 +332,64 @@ body {
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
+}
+
+/* Practice dock (primary controls) */
+.practiceDock {
+  background: var(--panel);
+  backdrop-filter: blur(14px);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 10px;
+}
+
+.practiceDockPrimary {
+  display: flex;
+  gap: 10px;
+}
+
+.practiceDockPrimary .btn.big {
+  flex: 1;
+}
+
+.practiceDockSecondary {
+  display: flex;
+  gap: 10px;
+  margin-top: 10px;
+  flex-wrap: wrap;
+}
+
+.practiceDockSecondary .btn.big {
+  flex: 1;
+}
+
+.practiceDockRatings {
+  display: flex;
+  gap: 10px;
+  margin-top: 10px;
+  flex-wrap: wrap;
+}
+
+.practiceDockRatings .btn.big {
+  flex: 1;
+  min-width: 120px;
+}
+
+@media (max-width: 640px) {
+  /* Keep the primary practice controls reachable by thumb */
+  .practiceDock {
+    position: fixed;
+    left: 12px;
+    right: 12px;
+    bottom: 12px;
+    z-index: 12;
+  }
+
+  /* Leave space so content and chips are not hidden behind the dock */
+  .container {
+    padding-bottom: 190px;
+  }
 }
 
 .chip {

@@ -105,6 +105,17 @@ export default function App() {
   const [view, setView] = useState<View>("home");
   const lastNonLibraryViewRef = useRef<View>("home");
 
+  const goHome = () => {
+    // Keep navigation predictable from anywhere.
+    setShowHelp(false);
+    setShowSettings(false);
+    setShowShortcuts(false);
+    setShowNewLanguage(false);
+    // If we were in the library, remember where to go back to.
+    lastNonLibraryViewRef.current = "home";
+    setView("home");
+  };
+
   const goToLibrary = () => {
     if (view !== "library") lastNonLibraryViewRef.current = view;
     setView("library");
@@ -698,6 +709,20 @@ export default function App() {
         return;
       }
 
+      // Library-specific shortcuts
+      if (view === "library") {
+        if (k === "n") {
+          e.preventDefault();
+          setShowNewLanguage(true);
+          return;
+        }
+        if (key === "Backspace") {
+          e.preventDefault();
+          backFromLibrary();
+          return;
+        }
+      }
+
       if (!pathProg) return;
 
       // Mode toggle
@@ -865,13 +890,13 @@ export default function App() {
   return (
     <div className="container">
       <header className="topbar">
-        <div className="brandRow">
+        <button type="button" className="brandRow brandBtn" onClick={goHome} title="Home">
           <div className="logoDot" aria-hidden="true" />
           <div>
             <div className="brandTitle">Sentence Paths</div>
             <div className="brandSub">Bilingual sentences • local-first • TTS</div>
           </div>
-        </div>
+        </button>
 
         <div className="topbarCenter">
           <button className="pill strong" onClick={goToLibrary} title="Library & import">
@@ -1001,31 +1026,49 @@ export default function App() {
             languageName={dataset?.name}
           />
 
-          <div className="actionBar" style={{ marginTop: 14 }}>
-            {pathProg?.mode === "srs" ? (
-              <>
-                <button className="btn" onClick={() => setView("home")}>Home</button>
-                <button className="btn" onClick={playCurrent}>Play</button>
-                <button className="btn" onClick={() => rateSRS("again")}>Again</button>
-                <button className="btn" onClick={() => rateSRS("hard")}>Hard</button>
-                <button className="btn primary" onClick={() => rateSRS("good")}>Good</button>
-                <button className="btn" onClick={() => rateSRS("easy")}>Easy</button>
-              </>
-            ) : (
-              <>
-                <button className="btn" onClick={() => setView("home")}>Home</button>
-                <button className="btn" onClick={() => bumpLinear(-1, true)}>
+          {/* Thumb-first primary controls (mobile-friendly) */}
+          {pathProg?.mode === "srs" ? (
+            <div className="practiceDock" style={{ marginTop: 14 }}>
+              <div className="practiceDockPrimary">
+                <button className="btn big primary" onClick={playCurrent} title="Play (P)">Play</button>
+              </div>
+              <div className="practiceDockRatings">
+                <button className="btn big" onClick={() => rateSRS("again")} title="Again (1)">Again</button>
+                <button className="btn big" onClick={() => rateSRS("hard")} title="Hard (2)">Hard</button>
+                <button className="btn big primary" onClick={() => rateSRS("good")} title="Good (3)">Good</button>
+                <button className="btn big" onClick={() => rateSRS("easy")} title="Easy (4)">Easy</button>
+              </div>
+            </div>
+          ) : (
+            <div className="practiceDock" style={{ marginTop: 14 }}>
+              <div className="practiceDockPrimary">
+                <button className="btn big" onClick={() => bumpLinear(-1, true)} title="Previous (Left arrow)">
                   Prev
                 </button>
-                <button className="btn primary" onClick={playCurrent}>
-                  Play
+
+                <button
+                  className={"btn big primary"}
+                  onClick={() => {
+                    if (autoRun) {
+                      setAutoPaused((p) => !p);
+                    } else {
+                      void playCurrent();
+                    }
+                  }}
+                  title={autoRun ? (autoPaused ? "Resume auto (Space)" : "Pause auto (Space)") : "Play (Space / P)"}
+                >
+                  {autoRun ? (autoPaused ? "Resume" : "Pause") : "Play"}
                 </button>
-                <button className="btn" onClick={() => bumpLinear(1, true)}>
+
+                <button className="btn big" onClick={() => bumpLinear(1, true)} title="Next (Right arrow)">
                   Next
                 </button>
+              </div>
+
+              <div className="practiceDockSecondary">
                 <button
-                  className={"btn " + (autoRun ? "primary" : "")}
-                  title={autoRun ? (autoPaused ? "Auto mode is paused. Press Space to resume." : "Auto mode is on. Press Space to pause.") : "Turn on auto mode"}
+                  className={"btn big " + (autoRun ? "primary" : "")}
+                  title={autoRun ? (autoPaused ? "Auto is paused. Press Space or tap Resume." : "Auto is on. Press Space or tap Pause.") : "Turn on auto mode"}
                   onClick={() => {
                     setAutoRun((v) => {
                       const nv = !v;
@@ -1034,12 +1077,19 @@ export default function App() {
                     });
                   }}
                 >
-                  {autoRun ? (autoPaused ? "Auto (paused)" : "Auto") : "Auto"}
+                  {autoRun ? (autoPaused ? "Auto (paused)" : "Auto: on") : "Auto: off"}
                 </button>
-              </>
-            )}
-          </div>
 
+                {autoRun ? (
+                  <button className="btn big" onClick={playCurrent} title="Play once (P)">
+                    Play once
+                  </button>
+                ) : null}
+              </div>
+            </div>
+          )}
+
+          {/* Secondary actions live below the primary dock (keeps practice decluttered) */}
           <div className="miniRow" style={{ marginTop: 12 }}>
             <button className="chip" onClick={() => setShowSource((v) => !v)}>
               {showSource ? "Hide English" : "Show English"}
@@ -1085,7 +1135,7 @@ export default function App() {
                 <button className="btn" onClick={() => setShowNewLanguage(true)}>
                   New language
                 </button>
-                <button className="btn" onClick={() => { setForceImportTips(false); backFromLibrary(); }}>
+                <button className="btn nav" onClick={() => { setForceImportTips(false); backFromLibrary(); }} title="Back">
                   Back
                 </button>
               </div>
@@ -1245,7 +1295,7 @@ export default function App() {
 
               <div className="row" style={{ marginTop: 10, gap: 10, flexWrap: "wrap" }}>
                 <button
-                  className="btn"
+                  className="btn primary"
                   onClick={async () => {
                     const { exportAllToJSON } = await import("./data/backup");
                     const json = await exportAllToJSON();
@@ -1253,10 +1303,10 @@ export default function App() {
                     showToast("Backup downloaded");
                   }}
                 >
-                  Download backup
+                  Back up data
                 </button>
                 <button
-                  className="btn"
+                  className="btn primary"
                   onClick={async () => {
                     const inp = document.createElement("input");
                     inp.type = "file";
@@ -1367,45 +1417,36 @@ export default function App() {
               </button>
             </div>
           </div>
-
-
-        <div className="panel" style={{ padding: 14, marginTop: 12 }}>
-          <div style={{ fontWeight: 900, marginBottom: 6 }}>Troubleshooting</div>
-          <div style={{ color: "var(--muted)", lineHeight: 1.5 }}>
-            If you see database errors (IndexedDB), resetting local data usually fixes it. Export a backup first if you need it.
-          </div>
-          <div style={{ marginTop: 10 }}>
-            <button
-              className="btn"
-              onClick={async () => {
-                if (!confirm("Reset local data on this device? This deletes all languages and progress stored in the browser.")) return;
-                try {
-                  await db.delete();
-                  // Clear a few UI prefs so first-run feels clean.
-                  localStorage.removeItem("sentencepaths_currentDataset");
-                  localStorage.removeItem("sentencepaths_currentDeck");
-                  location.reload();
-                } catch (e: any) {
-                  showToast(e?.message || "Reset failed.");
-                }
-              }}
-            >
-              Reset local data
-            </button>
-          </div>
-        </div>
         </div>
       </Modal>
 
       <Modal open={showHelp} title="Help & setup" onClose={() => setShowHelp(false)}>
         <div className="helpStack">
           <div>
-            <div style={{ fontWeight: 900, marginBottom: 6 }}>The flow</div>
-            <ol style={{ margin: 0, paddingLeft: 18, color: "var(--muted)" }}>
-              <li>If a language is empty, press <strong>Add sentences</strong>.</li>
-              <li>Press <strong>Start practice</strong>.</li>
-              <li>Choose <strong>Read</strong> for "book mode" or <strong>Review</strong> for spaced repetition.</li>
-              <li>Use <strong>Library</strong> to add languages, import, and back up.</li>
+            <div style={{ fontWeight: 900, marginBottom: 6 }}>Getting started</div>
+            <ol style={{ margin: 0, paddingLeft: 18, color: "var(--muted)", lineHeight: 1.6 }}>
+              <li>
+                Click <strong>Library &amp; Import</strong> in the top bar.
+                (Tip: the top-left <strong>Sentence Paths</strong> title is a <strong>Home</strong> button.)
+              </li>
+              <li>
+                Choose a <strong>language</strong> and <strong>path</strong>, or press <strong>New language</strong>.
+              </li>
+              <li>
+                Press <strong>Download template</strong> (XLSX / CSV / TSV) or use <strong>Interlinear Studio</strong> to generate a sheet.
+              </li>
+              <li>
+                Press <strong>Choose file</strong> to import. If you imported the wrong thing, use <strong>Undo last import</strong> or delete an import in the import list.
+              </li>
+              <li>
+                Press <strong>Back</strong>, then <strong>Start practice</strong>. Use <strong>Read</strong> (book mode) or <strong>Review</strong> (spaced repetition).
+              </li>
+              <li>
+                Press <strong>?</strong> anytime to see keyboard shortcuts.
+              </li>
+              <li>
+                Back up regularly: <strong>Library &amp; Import → Back up data</strong>. Restore on a new device with <strong>Restore backup</strong>.
+              </li>
             </ol>
           </div>
 
@@ -1413,6 +1454,7 @@ export default function App() {
             <div style={{ fontWeight: 900, marginBottom: 6 }}>Generate your import sheet</div>
             <div style={{ color: "var(--muted)", lineHeight: 1.5 }}>
               Use <strong>Interlinear Studio</strong> to generate or clean a sheet in the exact two / three / four-column format Sentence Paths imports.
+              Template headers are detected automatically (for example, “Target Language (Greek)” works).
             </div>
             <div style={{ marginTop: 10 }}>
               <a
@@ -1430,7 +1472,7 @@ export default function App() {
           <div className="panel" style={{ padding: 14 }}>
             <div style={{ fontWeight: 900, marginBottom: 6 }}>Backup reminder</div>
             <div style={{ color: "var(--muted)", lineHeight: 1.5 }}>
-              Sentence Paths is local-first. Back up your library regularly: <strong>Library → Backup</strong>.
+              Sentence Paths is local-first. Back up your library regularly: <strong>Library &amp; Import → Back up data</strong>.
             </div>
           </div>
 
@@ -1454,6 +1496,8 @@ export default function App() {
               <div className="k">H</div><div>Open help</div>
               <div className="k">S</div><div>Open settings</div>
               <div className="k">L</div><div>Open library & import</div>
+              <div className="k">N</div><div>New language (in library)</div>
+              <div className="k">Backspace</div><div>Back (in library)</div>
               <div className="k">Esc</div><div>Home</div>
             </div>
           </div>
