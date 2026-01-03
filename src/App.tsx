@@ -22,6 +22,7 @@ import { InstallCard } from "./components/InstallCard";
 import { SentenceCard } from "./components/SentenceCard";
 import { Modal } from "./components/Modal";
 import { useTTS } from "./hooks/useTTS";
+import { INTERLINEAR_STUDIO_URL } from "./config";
 
 type Mode = "linear" | "srs";
 
@@ -543,6 +544,50 @@ export default function App() {
     });
   }
 
+  // ---- Keyboard shortcuts (Practice) ----
+  // Space: Play
+  // ArrowLeft / ArrowRight: Prev / Next (linear mode)
+  useEffect(() => {
+    if (view !== "practice") return;
+    if (showHelp || showSettings || showNewLanguage) return;
+
+    const isTyping = (t: EventTarget | null) => {
+      const el = t as HTMLElement | null;
+      if (!el) return false;
+      const tag = (el.tagName || "").toLowerCase();
+      return tag === "input" || tag === "textarea" || tag === "select" || (el as any).isContentEditable;
+    };
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.repeat) return;
+      if (isTyping(e.target)) return;
+
+      // Space => Play
+      if (e.code === "Space" || e.key === " ") {
+        e.preventDefault();
+        void playCurrent();
+        return;
+      }
+
+      if (!pathProg) return;
+      if (pathProg.mode !== "linear") return;
+
+      // Arrow keys => navigate (count reps in both directions)
+      if (e.key === "ArrowRight") {
+        e.preventDefault();
+        void bumpLinear(1, true);
+        return;
+      }
+      if (e.key === "ArrowLeft") {
+        e.preventDefault();
+        void bumpLinear(-1, true);
+      }
+    };
+
+    window.addEventListener("keydown", onKeyDown, { passive: false });
+    return () => window.removeEventListener("keydown", onKeyDown as any);
+  }, [view, showHelp, showSettings, showNewLanguage, pathProg, playCurrent, bumpLinear]);
+
   // ---- Auto-run (linear only) ----
   const autoRunToken = useRef(0);
   useEffect(() => {
@@ -675,6 +720,27 @@ export default function App() {
               Current library: <strong>{sentenceCount}</strong> sentences • Due: <strong>{dueCount}</strong>
             </div>
           </div>
+
+          <div className="panel" style={{ padding: 16, marginTop: 12 }}>
+            <div className="row" style={{ justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+              <div style={{ minWidth: 240 }}>
+                <div style={{ fontWeight: 900, fontSize: 16 }}>Interlinear Studio</div>
+                <div style={{ color: "var(--muted)", fontSize: 13, lineHeight: 1.5, marginTop: 6 }}>
+                  Generate or clean an import sheet (XLSX / CSV / TSV) in the exact format Sentence Paths expects.
+                </div>
+              </div>
+
+              <a
+                className="btn primary"
+                href={INTERLINEAR_STUDIO_URL}
+                target="_blank"
+                rel="noreferrer"
+                style={{ textDecoration: "none", display: "inline-flex", alignItems: "center", justifyContent: "center" }}
+              >
+                Open Interlinear Studio
+              </a>
+            </div>
+          </div>
         </div>
       ) : null}
 
@@ -702,7 +768,7 @@ export default function App() {
             ) : (
               <>
                 <button className="btn" onClick={() => setView("home")}>Home</button>
-                <button className="btn" onClick={() => bumpLinear(-1, false)}>
+                <button className="btn" onClick={() => bumpLinear(-1, true)}>
                   Prev
                 </button>
                 <button className="btn primary" onClick={playCurrent}>
@@ -967,6 +1033,33 @@ export default function App() {
               </button>
             </div>
           </div>
+
+
+        <div className="panel" style={{ padding: 14, marginTop: 12 }}>
+          <div style={{ fontWeight: 900, marginBottom: 6 }}>Troubleshooting</div>
+          <div style={{ color: "var(--muted)", lineHeight: 1.5 }}>
+            If you see database errors (IndexedDB), resetting local data usually fixes it. Export a backup first if you need it.
+          </div>
+          <div style={{ marginTop: 10 }}>
+            <button
+              className="btn"
+              onClick={async () => {
+                if (!confirm("Reset local data on this device? This deletes all languages and progress stored in the browser.")) return;
+                try {
+                  await db.delete();
+                  // Clear a few UI prefs so first-run feels clean.
+                  localStorage.removeItem("sentencepaths_currentDataset");
+                  localStorage.removeItem("sentencepaths_currentDeck");
+                  location.reload();
+                } catch (e: any) {
+                  showToast(e?.message || "Reset failed.");
+                }
+              }}
+            >
+              Reset local data
+            </button>
+          </div>
+        </div>
         </div>
       </Modal>
 
@@ -980,6 +1073,24 @@ export default function App() {
               <li>Choose <strong>Read</strong> for "book mode" or <strong>Review</strong> for spaced repetition.</li>
               <li>Use <strong>Library</strong> to add languages, import, and back up.</li>
             </ol>
+          </div>
+
+          <div className="panel" style={{ padding: 14 }}>
+            <div style={{ fontWeight: 900, marginBottom: 6 }}>Generate your import sheet</div>
+            <div style={{ color: "var(--muted)", lineHeight: 1.5 }}>
+              Use <strong>Interlinear Studio</strong> to generate or clean a sheet in the exact two / three / four-column format Sentence Paths imports.
+            </div>
+            <div style={{ marginTop: 10 }}>
+              <a
+                className="btn primary"
+                href={INTERLINEAR_STUDIO_URL}
+                target="_blank"
+                rel="noreferrer"
+                style={{ textDecoration: "none", display: "inline-flex", alignItems: "center", justifyContent: "center" }}
+              >
+                Open Interlinear Studio
+              </a>
+            </div>
           </div>
 
           <div className="panel" style={{ padding: 14 }}>
@@ -1008,6 +1119,16 @@ export default function App() {
               showToast("Saved");
             }}
             voices={tts.voices}
+            onTestVoice={() => {
+              if (!dataset) return;
+              tts.prime();
+              tts.speak("Voice test.", {
+                lang: dataset.languageTag || "und",
+                rate: dataset.ttsRate ?? 1,
+                pitch: dataset.ttsPitch ?? 1,
+                voiceURI: dataset.preferredVoiceURI
+              });
+            }}
           />
         ) : null}
 
@@ -1057,6 +1178,36 @@ export default function App() {
               />
               <span style={{ color: "var(--muted)", fontSize: 13 }}>sec</span>
             </div>
+          </div>
+        </div>
+      
+
+        <div className="panel" style={{ padding: 14, marginTop: 12 }}>
+          <div style={{ fontWeight: 900, marginBottom: 6 }}>Troubleshooting</div>
+          <div style={{ color: "var(--muted)", lineHeight: 1.5 }}>
+            If you ever see a browser IndexedDB error (for example, <strong>"transaction has finished"</strong>), a reset usually fixes it.
+            Back up first if you care about your data.
+          </div>
+          <div style={{ marginTop: 10 }}>
+            <button
+              className="btn"
+              onClick={async () => {
+                const ok = confirm(`Reset local Sentence Paths data on this device?
+
+This will delete your local library (languages, paths, progress).
+Back up first if you need it.`);
+                if (!ok) return;
+                try {
+                  await db.delete();
+                } catch {
+                  // ignore
+                }
+                location.reload();
+              }}
+              title="Deletes local IndexedDB data and reloads"
+            >
+              Reset local data
+            </button>
           </div>
         </div>
       </Modal>

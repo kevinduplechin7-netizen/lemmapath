@@ -1,3 +1,4 @@
+import Dexie from "dexie";
 import { db, type Dataset, type SentenceRow, makeId, type ImportBatchRow } from "./db";
 import { countTokens } from "./tokenize";
 
@@ -229,7 +230,9 @@ export async function importCSVorTSV(opts: {
         await db.sentences.bulkPut(toInsert);
         toInsert.length = 0;
         onProgress?.(i / rows.length);
-        await new Promise((r) => setTimeout(r, 0));
+        // IMPORTANT: Avoid awaiting "foreign" promises inside a Dexie transaction.
+        // Dexie.waitFor keeps the transaction alive while we yield to the UI.
+        await Dexie.waitFor(new Promise<void>((r) => setTimeout(r, 0)));
       }
     }
 
@@ -338,7 +341,9 @@ export async function importXLSX(opts: {
         await db.sentences.bulkPut(toInsert);
         toInsert.length = 0;
         onProgress?.(i / Math.max(1, json.length));
-        await new Promise((r) => setTimeout(r, 0));
+        // IMPORTANT: Avoid awaiting "foreign" promises inside a Dexie transaction.
+        // Dexie.waitFor keeps the transaction alive while we yield to the UI.
+        await Dexie.waitFor(new Promise<void>((r) => setTimeout(r, 0)));
       }
     }
 

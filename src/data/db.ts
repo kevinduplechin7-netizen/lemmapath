@@ -492,31 +492,40 @@ export async function ensureDatasetStats(datasetId: string): Promise<DatasetStat
 }
 
 export async function recordTokensSeen(datasetId: string, tokens: string[]): Promise<number> {
+  // Keep this transaction-safe. In some browsers, awaiting non-DB work between
+  // IndexedDB requests can cause a transaction to auto-close, leading to
+  // "InvalidStateError: transaction has finished".
   const uniq = Array.from(new Set(tokens.map((t) => t.trim()).filter(Boolean)));
   if (uniq.length === 0) return 0;
 
   const keys = uniq.map((t) => [datasetId, t] as [string, string]);
-  const existing = await db.seenWords.bulkGet(keys);
-
   const now = Date.now();
-  const toAdd: SeenWordRow[] = [];
 
-  for (let i = 0; i < uniq.length; i++) {
-    if (!existing[i]) toAdd.push({ datasetId, token: uniq[i], firstSeenAt: now });
-  }
+  return await db.transaction("rw", db.seenWords, db.stats, async () => {
+    const existing = await db.seenWords.bulkGet(keys);
+    const toAdd: SeenWordRow[] = [];
 
-  if (toAdd.length) {
-    await db.seenWords.bulkPut(toAdd);
+    for (let i = 0; i < uniq.length; i++) {
+      if (!existing[i]) toAdd.push({ datasetId, token: uniq[i], firstSeenAt: now });
+    }
 
-    const stats = await ensureDatasetStats(datasetId);
-    await db.stats.put({
-      ...stats,
-      uniqueWordsSeen: stats.uniqueWordsSeen + toAdd.length,
-      updatedAt: now
-    });
-  }
+    // Always ensure the stats row exists so UI reads are stable.
+    const statsExisting = (await db.stats.get(datasetId).catch(() => undefined)) as DatasetStatsRow | undefined;
+    const base: DatasetStatsRow = statsExisting ?? { datasetId, uniqueWordsSeen: 0, updatedAt: now };
 
-  return toAdd.length;
+    if (toAdd.length) {
+      await db.seenWords.bulkPut(toAdd);
+      await db.stats.put({
+        ...base,
+        uniqueWordsSeen: (base.uniqueWordsSeen ?? 0) + toAdd.length,
+        updatedAt: now
+      });
+    } else if (!statsExisting) {
+      await db.stats.put(base);
+    }
+
+    return toAdd.length;
+  });
 }
 
 export async function getSentenceCount(datasetId: string, deckId: string): Promise<number> {
